@@ -144,6 +144,23 @@ importAdmin.get('/review', async (c) => {
     <AdminLayout title="Review import" user={user} error={c.req.query('error')}>
       <h1>Review import: {parsed.name}</h1>
       <p class="muted">Google rating {parsed.rating ?? '—'} ★ ({parsed.reviewCount ?? 0} reviews) · {parsed.mapsUrl ? <a href={parsed.mapsUrl} target="_blank" rel="noopener">Open in Maps</a> : null}{existing ? <> · <span class="badge ok">clinic already exists — fields below update it</span></> : null}{!city ? <> · <span class="badge warn">city not matched: "{parsed.cityName ?? '?'}" — choose one</span></> : null}</p>
+      {as === 'doctor' && !attached ? (
+        <div class="card" style="background:#f8fafc">
+          <b>Same doctor, different location?</b> Search existing doctors to attach this clinic instead of creating a duplicate.
+          {/* Separate form: HTML forbids nesting it inside the save form below. */}
+          <form method="get" action="/admin/import/review" class="filters" style="margin-top:8px">
+            <input type="hidden" name="place_id" value={placeId} /><input type="hidden" name="as" value={as} />
+            <div><input type="search" name="doctor_q" value={doctorQ} placeholder="Doctor name" /></div>
+            <div style="flex:0"><button class="btn small secondary" type="submit">Search</button></div>
+          </form>
+          {doctorQ ? (
+            <ul>
+              {doctorMatches.map((d) => <li><a href={`${reviewUrl}&attach_doctor_id=${encodeURIComponent(d.id)}`}>{d.name}</a> <span class="muted">{d.slug}</span></li>)}
+              {doctorMatches.length === 0 ? <li class="muted">No match.</li> : null}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
       <form method="post" action="/admin/import/save" class="card">
         <input type="hidden" name="place_id" value={placeId} />
         <input type="hidden" name="as" value={as} />
@@ -161,20 +178,6 @@ importAdmin.get('/review', async (c) => {
               <p>Attach this clinic to existing doctor <b>{attached.name}</b> (<code>{attached.slug}</code>).{targetDoctor ? null : <> <a href={reviewUrl}>Create a new doctor instead</a></>}</p>
             ) : (
               <>
-                <div class="card" style="background:#f8fafc">
-                  <b>Same doctor, different location?</b> Search existing doctors to attach this clinic instead of creating a duplicate.
-                  <form method="get" action="/admin/import/review" class="filters" style="margin-top:8px">
-                    <input type="hidden" name="place_id" value={placeId} /><input type="hidden" name="as" value={as} />
-                    <div><input type="search" name="doctor_q" value={doctorQ} placeholder="Doctor name" /></div>
-                    <div style="flex:0"><button class="btn small secondary" type="submit">Search</button></div>
-                  </form>
-                  {doctorQ ? (
-                    <ul>
-                      {doctorMatches.map((d) => <li><a href={`${reviewUrl}&attach_doctor_id=${encodeURIComponent(d.id)}`}>{d.name}</a> <span class="muted">{d.slug}</span></li>)}
-                      {doctorMatches.length === 0 ? <li class="muted">No match.</li> : null}
-                    </ul>
-                  ) : null}
-                </div>
                 <DoctorFields
                   v={{ name: parsed.doctorNameGuess ?? '', patients_treated: 'both', specialty_ids: sexologist ? [sexologist.id] : [], google_maps_url: parsed.mapsUrl, phone: parsed.phone, website: parsed.website, is_published: 0 }}
                   specialties={lk.specialties}
