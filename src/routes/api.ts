@@ -238,6 +238,36 @@ api.get('/sitemap', async (c) => {
 
 // ---- bookings ----
 
+type Timings = Partial<Record<'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun', [string, string][]>>
+const DAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const
+
+/** Timings JSON → object, or null when empty/invalid (= hours unknown, so no check). */
+export function parseTimings(raw: string | null | undefined): Timings | null {
+  if (!raw) return null
+  try {
+    const t = JSON.parse(raw)
+    return t && typeof t === 'object' && Object.keys(t).length > 0 ? (t as Timings) : null
+  } catch {
+    return null
+  }
+}
+
+const minutes = (hm: string) => {
+  const [h, m] = hm.split(':').map(Number)
+  return h * 60 + m
+}
+
+/** True when a slot like "12:30 PM" on YYYY-MM-DD falls inside one of that weekday's opening ranges. */
+export function slotWithinTimings(timings: Timings, date: string, slot: string): boolean {
+  const m = slot.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i)
+  if (!m) return false
+  const t = ((Number(m[1]) % 12) + (m[3].toUpperCase() === 'PM' ? 12 : 0)) * 60 + Number(m[2])
+  const weekday = new Date(`${date}T00:00:00Z`).getUTCDay()
+  const ranges: [string, string][] = timings[DAY_KEYS[weekday]] ?? []
+  return ranges.some(([open, close]) => t >= minutes(open) && t + 30 <= minutes(close))
+}
+
+
 api.post('/bookings', async (c) => {
   const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null
   if (!body) return c.json({ ok: false, error: 'Invalid JSON body' }, 400)
@@ -253,8 +283,11 @@ api.post('/bookings', async (c) => {
   const doctor = await one<{ id: string }>(c.env.DB, 'SELECT id FROM doctors WHERE id = ? AND is_published = 1', doctorId)
   if (!doctor) return c.json({ ok: false, error: 'Unknown doctor' }, 404)
   if (clinicId) {
-    const link = await one<{ clinic_id: string }>(c.env.DB, 'SELECT clinic_id FROM doctor_clinics WHERE doctor_id = ? AND clinic_id = ?', doctorId, clinicId)
+    const link = await one<{ clinic_id: string; timings: string | null; clinic_timings: string }>(c.env.DB, 'SELECT dc.clinic_id, dc.timings, cl.timings clinic_timings FROM doctor_clinics dc JOIN clinics cl ON cl.id = dc.clinic_id WHERE dc.doctor_id = ? AND dc.clinic_id = ?', doctorId, clinicId)
     if (!link) return c.json({ ok: false, error: 'Doctor does not consult at this clinic' }, 400)
+    // Reject slots outside the clinic's opening hours (the widget hides them, but the API must not trust it).
+    const timings = parseTimings(link.timings) ?? parseTimings(link.clinic_timings)
+    if (timings && !slotWithinTimings(timings, date, slot)) return c.json({ ok: false, error: 'The clinic is closed at that time' }, 400)
   }
   const id = uuid()
   await run(c.env.DB, 'INSERT INTO bookings (id, doctor_id, clinic_id, mode, date, slot, name, phone, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', id, doctorId, clinicId, mode, date, slot, name, phone, note)
