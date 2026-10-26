@@ -6,6 +6,7 @@ import { photoKey, putPhoto, deletePhoto, readUpload } from '../../lib/media'
 import { AdminLayout, yesNo } from './layout'
 import { DoctorFields } from './doctorFormView'
 import { lookups, redirectWithFlash, ID_RE } from './common'
+import { changeSlug, normaliseSlug, oldSlugsFor } from '../../lib/slugs'
 
 export const doctorsAdmin = new Hono<AppEnv>()
 
@@ -147,6 +148,7 @@ doctorsAdmin.get('/:id', async (c) => {
   const clinicResults = clinicQ
     ? await all<{ id: string; name: string; address: string; city_name: string }>(db, 'SELECT cl.id, cl.name, cl.address, ci.name city_name FROM clinics cl JOIN cities ci ON ci.id = cl.city_id WHERE cl.name LIKE ? AND cl.id NOT IN (SELECT clinic_id FROM doctor_clinics WHERE doctor_id = ?) ORDER BY cl.name LIMIT 20', `%${clinicQ}%`, d.id)
     : []
+  const oldSlugs = await oldSlugsFor(db, 'doctor', d.id)
   const v = {
     ...d,
     qualifications: jsonStringArray(d.qualifications),
@@ -158,7 +160,18 @@ doctorsAdmin.get('/:id', async (c) => {
   return c.html(
     <AdminLayout title={d.name} user={c.get('user')} flash={c.req.query('flash')} error={c.req.query('error')}>
       <h1>{d.name} {d.is_published ? <span class="badge ok">published</span> : <span class="badge warn">draft</span>} {d.is_verified ? <span class="badge ok">verified</span> : null}</h1>
-      <p class="muted">Slug: <code>{d.slug}</code> · Source: {d.source} · Public page: <a href={`${c.env.SITE_URL}/doctor/${d.slug}`} target="_blank" rel="noopener">{`/doctor/${d.slug}`}</a></p>
+      <p class="muted">Source: {d.source} · Public page: <a href={`${c.env.SITE_URL}/doctor/${d.slug}`} target="_blank" rel="noopener">{`/doctor/${d.slug}`}</a></p>
+
+      <form method="post" action={`/admin/doctors/${d.id}/slug`} class="card">
+        <h2 style="margin-top:0">Page URL</h2>
+        <div class="filters">
+          <div style="flex:1 1 320px"><label>Slug (lowercase letters, numbers, hyphens)</label>
+            <input name="slug" value={d.slug} pattern="[a-z0-9]+(-[a-z0-9]+)*" maxlength={80} required />
+            <small class="muted">Recommended: dr-name-primary-specialty-city, e.g. dr-arjun-mehta-urologist-delhi. Old URLs redirect (301) to the new one, so changing it is safe.</small></div>
+          <div style="flex:0"><button class="btn secondary" type="submit">Change URL</button></div>
+        </div>
+        {oldSlugs.length ? <p class="muted">Old URLs redirecting here: {oldSlugs.map((o) => <code style="margin-right:6px">{o}</code>)}</p> : null}
+      </form>
 
       <form method="post" action={`/admin/doctors/${d.id}`} class="card">
         <h2 style="margin-top:0">Profile</h2>
@@ -272,6 +285,17 @@ doctorsAdmin.post('/:id', async (c) => {
   ]
   await c.env.DB.batch(stmts)
   return c.redirect(redirectWithFlash(`/admin/doctors/${d.id}`, 'Profile saved.'))
+})
+
+doctorsAdmin.post('/:id/slug', async (c) => {
+  const d = await loadDoctor(c.env.DB, c.req.param('id'))
+  if (!d) return c.notFound()
+  const body = await c.req.parseBody()
+  const slug = normaliseSlug(typeof body.slug === 'string' ? body.slug : '')
+  if (!slug) return c.redirect(`/admin/doctors/${d.id}?error=${encodeURIComponent('Enter a valid slug: lowercase letters, numbers and hyphens.')}`)
+  const err = await changeSlug(c.env.DB, 'doctor', d.id, d.slug, slug)
+  if (err) return c.redirect(`/admin/doctors/${d.id}?error=${encodeURIComponent(err)}`)
+  return c.redirect(redirectWithFlash(`/admin/doctors/${d.id}`, slug === d.slug ? 'URL unchanged.' : `URL changed to /doctor/${slug}. The old URL now redirects.`))
 })
 
 doctorsAdmin.post('/:id/toggle', async (c) => {

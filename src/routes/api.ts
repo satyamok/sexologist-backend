@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../env'
 import { all, one, uuid, run, jsonStringArray, jsonObject } from '../lib/db'
 import { haversineKm } from '../lib/geo'
+import { resolveRedirect } from '../lib/slugs'
 import { runListing, type ListingParams, type Sort, type DoctorCard, rankCandidates, toCard, type CandidateRow, type Ref } from '../lib/listing'
 import { photosByClinic, photosJson, type PhotoRow } from '../lib/photos'
 
@@ -135,6 +136,16 @@ async function refsFor(db: D1Database, doctorId: string): Promise<{ specialties:
   const primary = sp.find((s) => s.is_primary === 1) ?? null
   return { specialties: sp.map((s) => ({ slug: s.slug, name: s.name })), primary: primary ? { slug: primary.slug, name: primary.name } : null, conditions: cn }
 }
+
+/** Old slug → current slug, so the frontend can answer with a 301. */
+api.get('/redirects/:entity/:slug', async (c) => {
+  const entity = c.req.param('entity')
+  const slug = c.req.param('slug')
+  if ((entity !== 'doctor' && entity !== 'clinic') || !SLUG.test(slug)) return c.json({ ok: false, error: 'invalid' }, 400)
+  const target = await resolveRedirect(c.env.DB, entity, slug)
+  if (!target) return c.json({ ok: false, error: 'Not found' }, 404)
+  return c.json({ ok: true, data: { slug: target } })
+})
 
 api.get('/doctors/:slug', async (c) => {
   const slug = c.req.param('slug')
