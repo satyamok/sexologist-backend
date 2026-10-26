@@ -413,7 +413,8 @@ export async function runListing(deps: ListingDeps, p: ListingParams): Promise<L
     otherSpecialtiesFor(db, city, area, specialty),
     all<{ question: string; answer: string }>(db, 'SELECT question, answer FROM page_faqs WHERE page_key = ? ORDER BY sort_order, rowid', pageKeyFor({ city: city?.slug ?? 'online', specialty: specialty?.slug, area: area?.slug, condition: condition?.slug })),
   ])
-  const faqs = faqRows.length ? faqRows.map((f) => ({ q: f.question, a: f.answer })) : fallbackFaqs({ specialty, condition, city, area, total })
+  // FAQs are English-only; non-English pages use the frontend's translated FAQ templates.
+  const faqs = locale !== 'en' ? [] : faqRows.length ? faqRows.map((f) => ({ q: f.question, a: f.answer })) : fallbackFaqs({ specialty, condition, city, area, total })
 
   // City / area names in the page language (nearby areas too). English stays when no row exists.
   const [cityNames, areaNames] = await Promise.all([
