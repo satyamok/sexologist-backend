@@ -17,7 +17,7 @@ type DoctorRow = {
   google_place_id: string | null; rating_avg: number | null; review_count: number; is_published: number; source: string; updated_at: string
 }
 
-type ClinicLink = { clinic_id: string; name: string; slug: string; address: string; city_name: string; consultation_fee: number | null; is_primary: number }
+type ClinicLink = { clinic_id: string; name: string; slug: string; address: string; city_name: string; consultation_fee: number | null; is_primary: number; photo_count: number }
 
 doctorsAdmin.get('/', async (c) => {
   const q = (c.req.query('q') ?? '').trim().slice(0, 80)
@@ -138,7 +138,7 @@ doctorsAdmin.get('/:id', async (c) => {
   const db = c.env.DB
   const [lk, clinics, specIds, condIds, primary] = await Promise.all([
     lookups(db),
-    all<ClinicLink>(db, 'SELECT dc.clinic_id, cl.name, cl.slug, cl.address, ci.name city_name, dc.consultation_fee, dc.is_primary FROM doctor_clinics dc JOIN clinics cl ON cl.id = dc.clinic_id JOIN cities ci ON ci.id = cl.city_id WHERE dc.doctor_id = ? ORDER BY dc.is_primary DESC, cl.name', d.id),
+    all<ClinicLink>(db, "SELECT dc.clinic_id, cl.name, cl.slug, cl.address, ci.name city_name, dc.consultation_fee, dc.is_primary, (SELECT COUNT(*) FROM photos p WHERE p.owner_type = 'clinic' AND p.owner_id = cl.id) photo_count FROM doctor_clinics dc JOIN clinics cl ON cl.id = dc.clinic_id JOIN cities ci ON ci.id = cl.city_id WHERE dc.doctor_id = ? ORDER BY dc.is_primary DESC, cl.name", d.id),
     all<{ specialty_id: string }>(db, 'SELECT specialty_id FROM doctor_specialties WHERE doctor_id = ?', d.id),
     all<{ condition_id: string }>(db, 'SELECT condition_id FROM doctor_conditions WHERE doctor_id = ?', d.id),
     one<{ specialty_id: string }>(db, 'SELECT specialty_id FROM doctor_specialties WHERE doctor_id = ? AND is_primary = 1', d.id),
@@ -167,17 +167,28 @@ doctorsAdmin.get('/:id', async (c) => {
       </form>
 
       <div class="card">
-        <h2 style="margin-top:0">Photo</h2>
+        <h2 style="margin-top:0">Profile picture</h2>
+        <p class="help" style="margin-top:0">Doctor's face photo. Clinic/office photos belong on the clinic page.</p>
         {d.photo_key ? (
           <p><img src={`${c.env.MEDIA_URL}/${d.photo_key}`} alt="" style="max-width:160px;border-radius:8px;display:block" />
             <span class="muted">{d.photo_key}{d.photo_attribution ? ` · ${d.photo_attribution}` : ''}</span></p>
-        ) : <p class="muted">No photo.</p>}
+        ) : <p class="muted">No profile picture.</p>}
         <form method="post" action={`/admin/doctors/${d.id}/photo`} enctype="multipart/form-data" class="actions">
           <input type="file" name="photo" accept="image/jpeg,image/png,image/webp" required />
           <input type="text" name="attribution" placeholder="Attribution (optional)" style="max-width:260px" />
           <button class="btn" type="submit">Upload to R2</button>
           {d.photo_key ? <button class="btn danger" type="submit" formaction={`/admin/doctors/${d.id}/photo/delete`} formnovalidate>Remove photo</button> : null}
         </form>
+        {clinics.length ? (
+          <>
+            <h3 style="font-size:14px;margin:16px 0 4px">Clinic photos</h3>
+            <ul style="margin:0">
+              {clinics.map((cl) => (
+                <li>{cl.name} <span class="muted">({cl.photo_count} {cl.photo_count === 1 ? 'photo' : 'photos'})</span> → <a href={`/admin/clinics/${cl.clinic_id}`}>edit</a></li>
+              ))}
+            </ul>
+          </>
+        ) : null}
       </div>
 
       <div class="card">

@@ -22,6 +22,24 @@ export async function deletePhoto(bucket: R2Bucket, key: string | null): Promise
   if (key) await bucket.delete(key)
 }
 
+export type Upload = { body: ArrayBuffer; contentType: string }
+
+/**
+ * Validates a multi-file input (`<input multiple>`; parseBody({all:true}) gives File | File[]).
+ * Empty file entries are skipped; the first invalid file aborts with an error so nothing is half-uploaded.
+ */
+export async function readUploads(files: unknown): Promise<{ uploads: Upload[] } | { error: string }> {
+  const list = Array.isArray(files) ? files : [files]
+  const uploads: Upload[] = []
+  for (const f of list) {
+    const r = await readUpload(f)
+    if (!r) continue
+    if ('error' in r) return r
+    uploads.push(r)
+  }
+  return { uploads }
+}
+
 /** Validates an uploaded File from a multipart form. Returns null when no file was sent. */
 export async function readUpload(file: unknown): Promise<{ body: ArrayBuffer; contentType: string } | { error: string } | null> {
   if (!(file instanceof File) || file.size === 0) return null

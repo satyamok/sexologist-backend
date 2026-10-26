@@ -3,6 +3,7 @@ import type { AppEnv } from '../env'
 import { all, one, uuid, run, jsonStringArray, jsonObject } from '../lib/db'
 import { haversineKm } from '../lib/geo'
 import { runListing, type ListingParams, type Sort, type DoctorCard, rankCandidates, toCard, type CandidateRow, type Ref } from '../lib/listing'
+import { photosByClinic, photosJson, type PhotoRow } from '../lib/photos'
 
 export const api = new Hono<AppEnv>()
 
@@ -113,14 +114,17 @@ const CLINIC_SELECT = `
          c.lat, c.lng, c.phone, c.whatsapp, c.website, c.timings, c.google_maps_url, c.google_rating, c.google_review_count, c.photo_key, c.photo_attribution, c.clinic_type
     FROM clinics c JOIN cities ci ON ci.id = c.city_id LEFT JOIN areas a ON a.id = c.area_id`
 
-function clinicJson(cl: ClinicRow, mediaUrl: string) {
+/** `photos` = ordered gallery; `photoUrl` = cover (first gallery photo, denormalised in clinics.photo_key). */
+function clinicJson(cl: ClinicRow, mediaUrl: string, photos: PhotoRow[] = []) {
+  const gallery = photosJson(photos, mediaUrl)
   return {
+    photos: gallery,
     id: cl.id, slug: cl.slug, name: cl.name, address: cl.address, pincode: cl.pincode, locality: cl.locality,
     citySlug: cl.city_slug, cityName: cl.city_name, city: { slug: cl.city_slug, name: cl.city_name }, areaSlug: cl.area_slug, areaName: cl.area_name,
     lat: cl.lat, lng: cl.lng, phone: cl.phone, whatsapp: cl.whatsapp, website: cl.website,
     timings: cl.doctor_timings && Object.keys(jsonObject(cl.doctor_timings)).length ? jsonObject(cl.doctor_timings) : jsonObject(cl.timings),
     googleMapsUrl: cl.google_maps_url, googleRating: cl.google_rating, googleReviewCount: cl.google_review_count,
-    photoUrl: cl.photo_key ? `${mediaUrl}/${cl.photo_key}` : null, photoAttribution: cl.photo_attribution, clinicType: cl.clinic_type,
+    photoUrl: gallery[0]?.url ?? (cl.photo_key ? `${mediaUrl}/${cl.photo_key}` : null), photoAttribution: gallery[0]?.attribution ?? cl.photo_attribution, clinicType: cl.clinic_type,
     fee: cl.fee ?? null, isPrimary: cl.is_primary === 1,
   }
 }
@@ -148,6 +152,7 @@ api.get('/doctors/:slug', async (c) => {
   const reviews = await all<{ id: string; author_name: string | null; rating: number; text: string | null; treated_for: string | null; is_verified: number; source: string; created_at: string }>(
     c.env.DB, 'SELECT id, author_name, rating, text, treated_for, is_verified, source, created_at FROM reviews WHERE doctor_id = ? AND is_published = 1 ORDER BY created_at DESC LIMIT 50', d.id)
   const faqs = await all<{ question: string; answer: string }>(c.env.DB, 'SELECT question, answer FROM page_faqs WHERE page_key = ? ORDER BY sort_order', `doctor:${d.slug}`)
+  const gal = await photosByClinic(c.env.DB, clinics.map((cl) => cl.id))
   const primaryClinic = clinics[0]
   const profile = {
     id: d.id, slug: d.slug, name: d.name, gender: d.gender, patientsTreated: d.patients_treated,
@@ -159,9 +164,9 @@ api.get('/doctors/:slug', async (c) => {
     videoConsult: d.video_consult === 1, videoFee: d.video_fee,
     ratingAvg: d.rating_avg, reviewCount: d.review_count, recommendPct: d.recommend_pct, googleRating: d.google_rating, googleReviewCount: d.google_review_count,
     conditions: refs.conditions, bio: d.bio, phone: d.phone, whatsapp: d.whatsapp, website: d.website, googleMapsUrl: d.google_maps_url,
-    clinic: primaryClinic ? { ...clinicJson(primaryClinic, c.env.MEDIA_URL), distanceKm: null } : null,
+    clinic: primaryClinic ? { ...clinicJson(primaryClinic, c.env.MEDIA_URL, gal.get(primaryClinic.id)), distanceKm: null } : null,
     clinicCount: clinics.length,
-    clinics: clinics.map((cl) => clinicJson(cl, c.env.MEDIA_URL)),
+    clinics: clinics.map((cl) => clinicJson(cl, c.env.MEDIA_URL, gal.get(cl.id))),
     reviews: reviews.map((r) => ({ id: r.id, authorName: r.author_name, rating: r.rating, text: r.text, treatedFor: r.treated_for, isVerified: r.is_verified === 1, source: r.source, createdAt: r.created_at })),
     faqs: faqs.map((f) => ({ q: f.question, a: f.answer })),
   }
@@ -180,18 +185,19 @@ api.get('/clinics/:slug', async (c) => {
             d.experience_years d_exp, d.languages d_languages, d.video_consult d_video, d.video_fee d_video_fee,
             d.rating_avg d_rating, d.review_count d_reviews, d.recommend_pct d_recommend, d.google_rating d_grating, d.google_review_count d_greviews,
             c.id c_id, c.slug c_slug, c.name c_name, c.locality c_locality, c.area_id c_area_id, a.slug c_area_slug,
-            c.address c_address, c.lat c_lat, c.lng c_lng, c.phone c_phone, c.whatsapp c_whatsapp, dc.consultation_fee fee
+            c.address c_address, c.lat c_lat, c.lng c_lng, c.phone c_phone, c.whatsapp c_whatsapp, c.photo_key c_photo_key, dc.consultation_fee fee
        FROM doctor_clinics dc JOIN doctors d ON d.id = dc.doctor_id JOIN clinics c ON c.id = dc.clinic_id LEFT JOIN areas a ON a.id = c.area_id
       WHERE dc.clinic_id = ? AND d.is_published = 1`,
     cl.id,
   )
   const ranked = rankCandidates(rows, { center: null, areaId: null, sort: 'relevance' })
+  const photos = (await photosByClinic(c.env.DB, [cl.id])).get(cl.id) ?? []
   const doctors: DoctorCard[] = []
   for (const r of ranked) {
     const refs = await refsFor(c.env.DB, r.row.d_id)
-    doctors.push(toCard(r, c.env.MEDIA_URL, refs.specialties, refs.primary, refs.conditions))
+    doctors.push(toCard(r, c.env.MEDIA_URL, refs.specialties, refs.primary, refs.conditions, photos))
   }
-  return ok(c, { ...clinicJson(cl, c.env.MEDIA_URL), doctors })
+  return ok(c, { ...clinicJson(cl, c.env.MEDIA_URL, photos), doctors })
 })
 
 // ---- sitemap ----

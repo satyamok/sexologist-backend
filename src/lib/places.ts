@@ -103,8 +103,8 @@ export async function placeDetails(apiKey: string, placeId: string, fetcher: typ
 }
 
 /** Returns the JPEG bytes of a photo resource (`places/.../photos/...`). */
-export async function fetchPhoto(apiKey: string, photoName: string, fetcher: typeof fetch = fetch): Promise<ArrayBuffer> {
-  const url = `${BASE}/${photoName}/media?maxWidthPx=800&key=${encodeURIComponent(apiKey)}`
+export async function fetchPhoto(apiKey: string, photoName: string, fetcher: typeof fetch = fetch, maxWidthPx = 1200): Promise<ArrayBuffer> {
+  const url = `${BASE}/${photoName}/media?maxWidthPx=${maxWidthPx}&key=${encodeURIComponent(apiKey)}`
   const res = await fetcher(url, { redirect: 'follow' })
   if (!res.ok) throw await readError(res)
   return res.arrayBuffer()
@@ -198,11 +198,23 @@ export type ParsedPlace = {
   doctorNameGuess: string | null
   photoName: string | null
   photoAttribution: string | null
+  /** Up to MAX_GOOGLE_PHOTOS photos for the clinic gallery (never used for the doctor profile picture). */
+  photos: { name: string; attribution: string | null }[]
+}
+
+export const MAX_GOOGLE_PHOTOS = 5
+
+export function parsePlacePhotos(place: Place, max = MAX_GOOGLE_PHOTOS): { name: string; attribution: string | null }[] {
+  return (place.photos ?? [])
+    .filter((p): p is PlacePhoto => !!p?.name)
+    .slice(0, max)
+    .map((p) => ({ name: p.name, attribution: photoAttribution(p) }))
 }
 
 export function parsePlace(place: Place): ParsedPlace {
   const photo = place.photos?.[0]
   return {
+    photos: parsePlacePhotos(place),
     placeId: place.id,
     name: place.displayName?.text ?? '',
     address: place.formattedAddress ?? '',

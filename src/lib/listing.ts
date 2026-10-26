@@ -4,6 +4,7 @@
  * and are unit-testable with a fake DB.
  */
 import { all, one, jsonStringArray, type SqlValue } from './db'
+import { photosByClinic, photosJson, type PhotoRow, type PhotoJson } from './photos'
 import { haversineKm, boundingBox, roundKm } from './geo'
 
 export const PER_PAGE = 20
@@ -70,6 +71,9 @@ export type DoctorCard = {
     phone: string | null
     whatsapp: string | null
     distanceKm: number | null
+    /** Cover photo (first gallery photo); never the doctor's profile picture. */
+    photoUrl: string | null
+    photos: PhotoJson[]
   }
   clinicCount: number
 }
@@ -81,7 +85,7 @@ export type CandidateRow = {
   d_exp: number | null; d_languages: string; d_video: number; d_video_fee: number | null
   d_rating: number | null; d_reviews: number; d_recommend: number | null; d_grating: number | null; d_greviews: number | null
   c_id: string; c_slug: string; c_name: string; c_locality: string | null; c_area_id: string | null; c_area_slug: string | null
-  c_address: string; c_lat: number; c_lng: number; c_phone: string | null; c_whatsapp: string | null; fee: number | null
+  c_address: string; c_lat: number; c_lng: number; c_phone: string | null; c_whatsapp: string | null; c_photo_key?: string | null; fee: number | null
 }
 
 export type DoctorRefRow = { doctor_id: string; slug: string; name: string; is_primary?: number }
@@ -171,8 +175,10 @@ export function toCard(
   specialties: Ref[],
   primary: Ref | null,
   conditions: Ref[],
+  clinicPhotos: PhotoRow[] = [],
 ): DoctorCard {
   const r = c.row
+  const gallery = photosJson(clinicPhotos, mediaUrl)
   return {
     id: r.d_id,
     slug: r.d_slug,
@@ -209,6 +215,8 @@ export function toCard(
       phone: r.c_phone,
       whatsapp: r.c_whatsapp,
       distanceKm: c.distanceKm,
+      photoUrl: gallery[0]?.url ?? (r.c_photo_key ? `${mediaUrl}/${r.c_photo_key}` : null),
+      photos: gallery,
     },
     clinicCount: c.clinicCount,
   }
@@ -273,7 +281,7 @@ const CANDIDATE_SELECT = `
          d.experience_years d_exp, d.languages d_languages, d.video_consult d_video, d.video_fee d_video_fee,
          d.rating_avg d_rating, d.review_count d_reviews, d.recommend_pct d_recommend, d.google_rating d_grating, d.google_review_count d_greviews,
          c.id c_id, c.slug c_slug, c.name c_name, c.locality c_locality, c.area_id c_area_id, a.slug c_area_slug,
-         c.address c_address, c.lat c_lat, c.lng c_lng, c.phone c_phone, c.whatsapp c_whatsapp, dc.consultation_fee fee
+         c.address c_address, c.lat c_lat, c.lng c_lng, c.phone c_phone, c.whatsapp c_whatsapp, c.photo_key c_photo_key, dc.consultation_fee fee
     FROM doctors d
     JOIN doctor_clinics dc ON dc.doctor_id = d.id
     JOIN clinics c ON c.id = dc.clinic_id
@@ -342,12 +350,13 @@ export async function runListing(deps: ListingDeps, p: ListingParams): Promise<L
   const slice = ranked.slice((page - 1) * PER_PAGE, page * PER_PAGE)
 
   const ids = slice.map((c) => c.row.d_id)
-  const [specMap, primMap, condMap] = await Promise.all([
+  const [specMap, primMap, condMap, photoMap] = await Promise.all([
     doctorRefs(db, 'doctor_specialties', 'specialties', 'specialty_id', ids),
     doctorPrimary(db, ids),
     doctorRefs(db, 'doctor_conditions', 'conditions', 'condition_id', ids),
+    photosByClinic(db, slice.map((c) => c.row.c_id)),
   ])
-  const items = slice.map((c) => toCard(c, deps.mediaUrl, specMap.get(c.row.d_id) ?? [], primMap.get(c.row.d_id) ?? null, condMap.get(c.row.d_id) ?? []))
+  const items = slice.map((c) => toCard(c, deps.mediaUrl, specMap.get(c.row.d_id) ?? [], primMap.get(c.row.d_id) ?? null, condMap.get(c.row.d_id) ?? [], photoMap.get(c.row.c_id) ?? []))
 
   const rated = ranked.filter((c) => c.row.d_rating !== null)
   const aggregate = {

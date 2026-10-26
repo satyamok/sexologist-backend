@@ -4,6 +4,7 @@ import { all, one, uuid, uniqueSlug, doctorSlug as makeDoctorSlug, toInt } from 
 import { searchText, placeDetails, fetchPhoto, parsePlace, PlacesError, type Place } from '../../lib/places'
 import { parseDoctorForm, doctorColumns, relationStatements } from '../../lib/doctorForm'
 import { photoKey, putPhoto } from '../../lib/media'
+import { MAX_PHOTOS_PER_CLINIC, listPhotos, insertPhotoStmt, remainingSlots, syncCoverStmt } from '../../lib/photos'
 import { AdminLayout, Field, Select } from './layout'
 import { DoctorFields } from './doctorFormView'
 import { ClinicFields, parseClinicForm, insertClinicStmt, nearestArea, type ClinicRow } from './clinics'
@@ -188,9 +189,12 @@ importAdmin.get('/review', async (c) => {
           </fieldset>
         ) : null}
         <fieldset>
-          <legend>Photo</legend>
-          {parsed.photoName ? (
-            <label class="check"><input type="checkbox" name="import_photo" checked={false} />Import first Google photo to R2 ({as === 'doctor' && !attached ? 'doctor + clinic' : 'clinic'}). Attribution stored: {parsed.photoAttribution ?? 'none'}</label>
+          <legend>Clinic photos</legend>
+          {parsed.photos.length ? (
+            <>
+              <label class="check"><input type="checkbox" name="import_photo" checked={false} />Import up to {parsed.photos.length} Google photo{parsed.photos.length === 1 ? '' : 's'} into the clinic photo gallery (with attribution).</label>
+              <p class="help">These are office/storefront photos from Google Maps. They are never used as the doctor's profile picture — upload a face photo on the doctor page instead.</p>
+            </>
           ) : <p class="muted">This place has no photos.</p>}
         </fieldset>
         <div class="actions">
@@ -275,19 +279,21 @@ importAdmin.post('/save', async (c) => {
 
   // Photo import happens after the batch so a Google error never leaves a half-saved import.
   let photoNote = ''
-  if (body.import_photo === 'on' && parsed.photoName && apiKey) {
+  // Google photos are office/storefront pictures: they go into the clinic gallery only, never into doctors.photo_key.
+  if (body.import_photo === 'on' && parsed.photos.length && apiKey) {
     try {
-      const bytes = await fetchPhoto(apiKey, parsed.photoName)
-      const clinicKey = photoKey('clinics', clinicSlug)
-      await putPhoto(c.env.MEDIA, clinicKey, bytes)
-      const after: D1PreparedStatement[] = [db.prepare('UPDATE clinics SET photo_key = ?, photo_attribution = ? WHERE id = ?').bind(clinicKey, parsed.photoAttribution, clinicId)]
-      if (createDoctor && doctorId && doctorSlug) {
-        const docKey = photoKey('doctors', doctorSlug)
-        await putPhoto(c.env.MEDIA, docKey, bytes)
-        after.push(db.prepare('UPDATE doctors SET photo_key = ?, photo_attribution = ? WHERE id = ?').bind(docKey, parsed.photoAttribution, doctorId))
+      const existing = await listPhotos(db, 'clinic', clinicId)
+      const slots = remainingSlots(existing.length, parsed.photos.length)
+      let order = existing.reduce((m, p) => Math.max(m, p.sort_order), -1) + 1
+      const after: D1PreparedStatement[] = []
+      for (const [i, ph] of parsed.photos.slice(0, slots).entries()) {
+        const bytes = await fetchPhoto(apiKey, ph.name, fetch, 1200)
+        const key = photoKey('clinics', `${clinicSlug}-${i + 1}`)
+        await putPhoto(c.env.MEDIA, key, bytes)
+        after.push(insertPhotoStmt(db, { ownerType: 'clinic', ownerId: clinicId, key, attribution: ph.attribution, sortOrder: order++ }))
       }
-      await db.batch(after)
-      photoNote = ' Photo imported.'
+      if (after.length) await db.batch([...after, syncCoverStmt(db, clinicId)])
+      photoNote = slots ? ` ${after.length} clinic photo${after.length === 1 ? '' : 's'} imported.` : ` No photos imported (gallery already has ${MAX_PHOTOS_PER_CLINIC}).`
     } catch (e) {
       photoNote = ` Photo import failed: ${e instanceof Error ? e.message : 'unknown error'}.`
     }

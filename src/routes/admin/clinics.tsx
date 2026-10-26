@@ -2,7 +2,8 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../../env'
 import { all, one, run, uuid, uniqueSlug, toInt, toFloat, str, bool, jsonObject } from '../../lib/db'
 import { isValidLatLng, haversineKm } from '../../lib/geo'
-import { photoKey, putPhoto, deletePhoto, readUpload } from '../../lib/media'
+import { photoKey, putPhoto, deletePhoto, readUploads } from '../../lib/media'
+import { MAX_PHOTOS_PER_CLINIC, listPhotos, insertPhotoStmt, reorderStmts, reorderIds, remainingSlots, syncCoverStmt, type PhotoRow } from '../../lib/photos'
 import { AdminLayout, Field, Select } from './layout'
 import { lookups, redirectWithFlash, ID_RE, CLINIC_TYPES, type AreaOpt } from './common'
 
@@ -232,6 +233,7 @@ clinicsAdmin.get('/:id', async (c) => {
   if (!cl) return c.notFound()
   const lk = await lookups(c.env.DB)
   const doctors = await all<{ id: string; name: string; consultation_fee: number | null }>(c.env.DB, 'SELECT d.id, d.name, dc.consultation_fee FROM doctor_clinics dc JOIN doctors d ON d.id = dc.doctor_id WHERE dc.clinic_id = ? ORDER BY d.name', cl.id)
+  const photos = await listPhotos(c.env.DB, 'clinic', cl.id)
   return c.html(
     <AdminLayout title={cl.name} user={c.get('user')} flash={c.req.query('flash')} error={c.req.query('error')}>
       <h1>{cl.name}</h1>
@@ -240,16 +242,7 @@ clinicsAdmin.get('/:id', async (c) => {
         <ClinicFields v={{ ...cl, timings: JSON.stringify(jsonObject(cl.timings)) }} cities={lk.cities} areas={lk.areas} withMap />
         <div class="actions"><button class="btn" type="submit">Save clinic</button></div>
       </form>
-      <div class="card">
-        <h2 style="margin-top:0">Photo</h2>
-        {cl.photo_key ? <p><img src={`${c.env.MEDIA_URL}/${cl.photo_key}`} alt="" style="max-width:200px;border-radius:8px;display:block" /><span class="muted">{cl.photo_key}{cl.photo_attribution ? ` · ${cl.photo_attribution}` : ''}</span></p> : <p class="muted">No photo.</p>}
-        <form method="post" action={`/admin/clinics/${cl.id}/photo`} enctype="multipart/form-data" class="actions">
-          <input type="file" name="photo" accept="image/jpeg,image/png,image/webp" required />
-          <input type="text" name="attribution" placeholder="Attribution (optional)" style="max-width:260px" />
-          <button class="btn" type="submit">Upload to R2</button>
-          {cl.photo_key ? <button class="btn danger" type="submit" formaction={`/admin/clinics/${cl.id}/photo/delete`} formnovalidate>Remove photo</button> : null}
-        </form>
-      </div>
+      <ClinicPhotos clinic={cl} photos={photos} mediaUrl={c.env.MEDIA_URL} />
       <div class="card">
         <h2 style="margin-top:0">Doctors here ({doctors.length})</h2>
         <ul>{doctors.map((d) => <li><a href={`/admin/doctors/${d.id}`}>{d.name}</a>{d.consultation_fee !== null ? <span class="muted"> · Rs {d.consultation_fee}</span> : null}</li>)}</ul>
@@ -278,37 +271,111 @@ clinicsAdmin.post('/:id', async (c) => {
   return c.redirect(redirectWithFlash(`/admin/clinics/${cl.id}`, 'Clinic saved.'))
 })
 
-clinicsAdmin.post('/:id/photo', async (c) => {
-  const id = c.req.param('id')
-  const cl = ID_RE.test(id) ? await one<ClinicRow>(c.env.DB, 'SELECT * FROM clinics WHERE id = ?', id) : null
+// ---------- Clinic photos (gallery) ----------
+
+/** Admin section: multi-upload plus one small form per thumbnail (HTML forbids nested forms). */
+const ClinicPhotos = ({ clinic, photos, mediaUrl }: { clinic: ClinicRow; photos: PhotoRow[]; mediaUrl: string }) => {
+  const base = `/admin/clinics/${clinic.id}/photos`
+  const full = photos.length >= MAX_PHOTOS_PER_CLINIC
+  return (
+    <div class="card">
+      <h2 style="margin-top:0">Clinic photos <span class="muted">({photos.length}/{MAX_PHOTOS_PER_CLINIC})</span></h2>
+      <p class="help" style="margin-top:0">Office, reception and interior photos shown on the public clinic page. The first photo is the cover. The doctor's face photo belongs on the doctor page ("Profile picture").</p>
+      {photos.length === 0 ? <p class="muted">No photos yet.</p> : null}
+      <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(240px,1fr))">
+        {photos.map((p, i) => (
+          <form method="post" action={`${base}/${p.id}`} class="stat" style="padding:10px">
+            <img src={`${mediaUrl}/${p.key}`} alt={p.caption ?? `Photo ${i + 1}`} loading="lazy" style="width:100%;height:150px;object-fit:cover;border-radius:6px;display:block" />
+            <div class="muted" style="margin:6px 0 4px">{i === 0 ? <span class="badge ok">cover</span> : <span class="badge">#{i + 1}</span>}{p.attribution ? <> · {p.attribution}</> : null}</div>
+            <input type="text" name="caption" value={p.caption ?? ''} placeholder="Caption (alt text)" maxlength={200} />
+            <div class="actions" style="margin-top:8px;gap:6px">
+              <button class="btn small" type="submit" name="action" value="caption">Save</button>
+              <button class="btn small secondary" type="submit" name="action" value="up" disabled={i === 0} title="Move up">↑</button>
+              <button class="btn small secondary" type="submit" name="action" value="down" disabled={i === photos.length - 1} title="Move down">↓</button>
+              {i !== 0 ? <button class="btn small secondary" type="submit" name="action" value="cover">Use as cover</button> : null}
+              <button class="btn small danger" type="submit" name="action" value="remove" onclick="return confirm('Remove this photo? It is deleted from storage too.')">Remove</button>
+            </div>
+          </form>
+        ))}
+      </div>
+      <form method="post" action={base} enctype="multipart/form-data" class="actions">
+        <input type="file" name="photos" accept="image/jpeg,image/png,image/webp" multiple required disabled={full} />
+        <input type="text" name="attribution" placeholder="Attribution for these photos (optional)" style="max-width:280px" />
+        <button class="btn" type="submit" disabled={full}>Upload photos</button>
+        <span class="help">JPEG, PNG or WebP, max 5 MB each, up to {MAX_PHOTOS_PER_CLINIC} photos per clinic.{full ? ' Gallery is full — remove a photo first.' : ''}</span>
+      </form>
+    </div>
+  )
+}
+
+async function loadClinic(db: D1Database, id: string): Promise<ClinicRow | null> {
+  return ID_RE.test(id) ? one<ClinicRow>(db, 'SELECT * FROM clinics WHERE id = ?', id) : null
+}
+
+clinicsAdmin.post('/:id/photos', async (c) => {
+  const cl = await loadClinic(c.env.DB, c.req.param('id'))
   if (!cl) return c.notFound()
-  const body = await c.req.parseBody()
-  const upload = await readUpload(body.photo)
-  if (!upload) return c.redirect(`/admin/clinics/${cl.id}?error=${encodeURIComponent('Choose a photo file first.')}`)
-  if ('error' in upload) return c.redirect(`/admin/clinics/${cl.id}?error=${encodeURIComponent(upload.error)}`)
-  const key = photoKey('clinics', cl.slug, upload.contentType)
-  await putPhoto(c.env.MEDIA, key, upload.body, upload.contentType)
-  // Remove the previous file so the bucket does not collect stale versions.
-  if (cl.photo_key && cl.photo_key !== key) await deletePhoto(c.env.MEDIA, cl.photo_key)
-  await run(c.env.DB, "UPDATE clinics SET photo_key = ?, photo_attribution = ?, updated_at = datetime('now') WHERE id = ?", key, str(body.attribution), cl.id)
-  return c.redirect(redirectWithFlash(`/admin/clinics/${cl.id}`, 'Photo uploaded.'))
+  const fail = (msg: string) => c.redirect(`/admin/clinics/${cl.id}?error=${encodeURIComponent(msg)}`)
+  const body = await c.req.parseBody({ all: true })
+  const read = await readUploads(body.photos)
+  if ('error' in read) return fail(read.error)
+  if (read.uploads.length === 0) return fail('Choose one or more photo files first.')
+  const existing = await listPhotos(c.env.DB, 'clinic', cl.id)
+  const slots = remainingSlots(existing.length, read.uploads.length)
+  if (slots === 0) return fail(`This clinic already has ${MAX_PHOTOS_PER_CLINIC} photos. Remove one first.`)
+  const attribution = str(typeof body.attribution === 'string' ? body.attribution : undefined)
+  const stmts: D1PreparedStatement[] = []
+  let order = existing.reduce((m, p) => Math.max(m, p.sort_order), -1) + 1
+  for (const [i, up] of read.uploads.slice(0, slots).entries()) {
+    // photoKey() is time-versioned to the millisecond; add an index so a multi-upload never collides.
+    const key = photoKey('clinics', `${cl.slug}-${i + 1}`, up.contentType)
+    await putPhoto(c.env.MEDIA, key, up.body, up.contentType)
+    stmts.push(insertPhotoStmt(c.env.DB, { ownerType: 'clinic', ownerId: cl.id, key, attribution, sortOrder: order++ }))
+  }
+  stmts.push(syncCoverStmt(c.env.DB, cl.id))
+  await c.env.DB.batch(stmts)
+  const skipped = read.uploads.length - slots
+  return c.redirect(redirectWithFlash(`/admin/clinics/${cl.id}`, `${slots} photo${slots === 1 ? '' : 's'} uploaded.${skipped ? ` ${skipped} skipped (limit ${MAX_PHOTOS_PER_CLINIC}).` : ''}`))
 })
 
-clinicsAdmin.post('/:id/photo/delete', async (c) => {
-  const id = c.req.param('id')
-  const cl = ID_RE.test(id) ? await one<ClinicRow>(c.env.DB, 'SELECT * FROM clinics WHERE id = ?', id) : null
-  if (!cl) return c.notFound()
-  await deletePhoto(c.env.MEDIA, cl.photo_key)
-  await run(c.env.DB, "UPDATE clinics SET photo_key = NULL, photo_attribution = NULL, updated_at = datetime('now') WHERE id = ?", cl.id)
-  return c.redirect(redirectWithFlash(`/admin/clinics/${cl.id}`, 'Photo removed.'))
+clinicsAdmin.post('/:id/photos/:photoId', async (c) => {
+  const cl = await loadClinic(c.env.DB, c.req.param('id'))
+  const photoId = c.req.param('photoId')
+  if (!cl || !ID_RE.test(photoId)) return c.notFound()
+  const body = await c.req.parseBody()
+  const action = typeof body.action === 'string' ? body.action : ''
+  const photos = await listPhotos(c.env.DB, 'clinic', cl.id)
+  const photo = photos.find((p) => p.id === photoId)
+  if (!photo) return c.redirect(`/admin/clinics/${cl.id}?error=${encodeURIComponent('Photo not found.')}`)
+  const db = c.env.DB
+  let flash = 'Photos updated.'
+  if (action === 'caption') {
+    await db.batch([db.prepare('UPDATE photos SET caption = ? WHERE id = ?').bind(str(body.caption), photo.id), syncCoverStmt(db, cl.id)])
+    flash = 'Caption saved.'
+  } else if (action === 'up' || action === 'down' || action === 'cover') {
+    const next = reorderIds(photos.map((p) => p.id), photo.id, action)
+    await db.batch([...reorderStmts(db, cl.id, next), syncCoverStmt(db, cl.id)])
+    flash = action === 'cover' ? 'Cover photo set.' : 'Photo moved.'
+  } else if (action === 'remove') {
+    await deletePhoto(c.env.MEDIA, photo.key)
+    const rest = photos.filter((p) => p.id !== photo.id).map((p) => p.id)
+    await db.batch([db.prepare('DELETE FROM photos WHERE id = ?').bind(photo.id), ...reorderStmts(db, cl.id, rest), syncCoverStmt(db, cl.id)])
+    flash = 'Photo removed.'
+  } else {
+    return c.redirect(`/admin/clinics/${cl.id}?error=${encodeURIComponent('Unknown photo action.')}`)
+  }
+  return c.redirect(redirectWithFlash(`/admin/clinics/${cl.id}`, flash))
 })
 
 clinicsAdmin.post('/:id/delete', async (c) => {
   const id = c.req.param('id')
   const cl = ID_RE.test(id) ? await one<ClinicRow>(c.env.DB, 'SELECT * FROM clinics WHERE id = ?', id) : null
   if (!cl) return c.notFound()
-  await deletePhoto(c.env.MEDIA, cl.photo_key)
+  const photos = await listPhotos(c.env.DB, 'clinic', cl.id)
+  for (const p of photos) await deletePhoto(c.env.MEDIA, p.key)
+  if (cl.photo_key && !photos.some((p) => p.key === cl.photo_key)) await deletePhoto(c.env.MEDIA, cl.photo_key)
   await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM photos WHERE owner_type = 'clinic' AND owner_id = ?").bind(cl.id),
     c.env.DB.prepare('DELETE FROM doctor_clinics WHERE clinic_id = ?').bind(cl.id),
     c.env.DB.prepare('UPDATE bookings SET clinic_id = NULL WHERE clinic_id = ?').bind(cl.id),
     c.env.DB.prepare('DELETE FROM clinics WHERE id = ?').bind(cl.id),
