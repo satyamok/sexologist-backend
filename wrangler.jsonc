@@ -1,6 +1,8 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "sexologist-backend",
+  // Keep variables and secrets added in the Cloudflare dashboard across git deploys.
+  "keep_vars": true,
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
