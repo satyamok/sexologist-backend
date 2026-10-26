@@ -11,9 +11,14 @@ export const api = new Hono<AppEnv>()
 const SORTS: Sort[] = ['relevance', 'distance', 'experience', 'fee_asc', 'fee_desc', 'reviews']
 const SLUG = /^[a-z0-9-]{1,80}$/
 
+// Edge cache: detail pages refresh within a minute of an admin edit; listings and lookups may be 5 minutes behind.
+const DETAIL = /^\/api\/(doctors|clinics|redirects)\//
 api.use('*', async (c, next) => {
   await next()
-  if (c.req.method === 'GET' && c.res.ok) c.res.headers.set('Cache-Control', 'public, s-maxage=300')
+  if (c.req.method === 'GET' && c.res.ok) {
+    const ttl = DETAIL.test(new URL(c.req.url).pathname) ? 60 : 300
+    c.res.headers.set('Cache-Control', `public, s-maxage=${ttl}`)
+  }
 })
 
 const ok = (c: { json: (b: unknown, s?: 200) => Response }, data: unknown) => c.json({ ok: true, data })
