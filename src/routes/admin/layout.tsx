@@ -52,6 +52,7 @@ export const AdminLayout: FC<LayoutProps> = ({ title, user, flash, error, childr
               <a href="/admin/cities">Cities</a>
               <a href="/admin/faqs">FAQs</a>
               <a href="/admin/bookings">Bookings</a>
+              <a href="/admin/sales">Sales</a>
               {user.role === 'master_admin' ? <a href="/admin/users">Users</a> : null}
             </nav>
             <span class="user">{user.name}</span>

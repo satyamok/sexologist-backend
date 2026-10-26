@@ -12,6 +12,7 @@ import { citiesAdmin } from './cities'
 import { faqsAdmin } from './faqs'
 import { usersAdmin } from './users'
 import { bookingsAdmin } from './bookings'
+import { salesAdmin } from './sales'
 
 export const admin = new Hono<AppEnv>()
 
@@ -85,3 +86,4 @@ admin.route('/cities', citiesAdmin)
 admin.route('/faqs', faqsAdmin)
 admin.route('/users', usersAdmin)
 admin.route('/bookings', bookingsAdmin)
+admin.route('/sales', salesAdmin)
