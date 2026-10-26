@@ -286,8 +286,10 @@ clinicsAdmin.post('/:id/photo', async (c) => {
   const upload = await readUpload(body.photo)
   if (!upload) return c.redirect(`/admin/clinics/${cl.id}?error=${encodeURIComponent('Choose a photo file first.')}`)
   if ('error' in upload) return c.redirect(`/admin/clinics/${cl.id}?error=${encodeURIComponent(upload.error)}`)
-  const key = photoKey('clinics', cl.slug)
+  const key = photoKey('clinics', cl.slug, upload.contentType)
   await putPhoto(c.env.MEDIA, key, upload.body, upload.contentType)
+  // Remove the previous file so the bucket does not collect stale versions.
+  if (cl.photo_key && cl.photo_key !== key) await deletePhoto(c.env.MEDIA, cl.photo_key)
   await run(c.env.DB, "UPDATE clinics SET photo_key = ?, photo_attribution = ?, updated_at = datetime('now') WHERE id = ?", key, str(body.attribution), cl.id)
   return c.redirect(redirectWithFlash(`/admin/clinics/${cl.id}`, 'Photo uploaded.'))
 })

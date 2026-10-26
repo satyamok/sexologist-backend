@@ -3,8 +3,15 @@
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 const ALLOWED = new Set(['image/jpeg', 'image/png', 'image/webp'])
 
-export function photoKey(kind: 'doctors' | 'clinics', slug: string): string {
-  return `${kind}/${slug}.jpg`
+const EXT: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }
+
+/**
+ * Versioned key, e.g. doctors/<slug>-k7x2m9.jpg. Every upload gets a new name so a replaced
+ * photo is never hidden by the one-year browser/CDN cache on the old URL.
+ */
+export function photoKey(kind: 'doctors' | 'clinics', slug: string, contentType = 'image/jpeg'): string {
+  const version = Date.now().toString(36)
+  return `${kind}/${slug}-${version}.${EXT[contentType] ?? 'jpg'}`
 }
 
 export async function putPhoto(bucket: R2Bucket, key: string, body: ArrayBuffer, contentType = 'image/jpeg'): Promise<void> {
