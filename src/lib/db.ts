@@ -67,6 +67,17 @@ export async function uniqueSlug(db: D1Database, table: 'doctors' | 'clinics', b
   return `${root}-${uuid().slice(0, 6)}`
 }
 
+/**
+ * SEO slug for a new doctor: dr-{name}-{primary specialty}-{city}, e.g. dr-arjun-mehta-sexologist-delhi.
+ * Specialty and city are looked up by id and skipped when unknown.
+ */
+export async function doctorSlug(db: D1Database, name: string, specialtyId: string | null | undefined, cityId: string | null | undefined): Promise<string> {
+  const bare = name.replace(/^dr\.?\s*/i, '')
+  const spec = specialtyId ? await one<{ slug: string }>(db, 'SELECT slug FROM specialties WHERE id = ?', specialtyId) : null
+  const city = cityId ? await one<{ slug: string }>(db, 'SELECT slug FROM cities WHERE id = ?', cityId) : null
+  return uniqueSlug(db, 'doctors', ['dr', bare, spec?.slug, city?.slug].filter(Boolean).join(' '))
+}
+
 /** Split a comma/newline separated textarea value into a trimmed string[]. */
 export function splitList(raw: string | undefined | null): string[] {
   if (!raw) return []

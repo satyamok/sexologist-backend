@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../../env'
-import { all, one, run, uuid, uniqueSlug, jsonStringArray, toInt, str } from '../../lib/db'
+import { all, one, run, uuid, doctorSlug, jsonStringArray, toInt, str } from '../../lib/db'
 import { parseDoctorForm, doctorColumns, relationStatements } from '../../lib/doctorForm'
 import { photoKey, putPhoto, deletePhoto, readUpload } from '../../lib/media'
 import { AdminLayout, yesNo } from './layout'
@@ -117,7 +117,7 @@ doctorsAdmin.post('/', async (c) => {
   }
   const d = parsed.value
   const id = uuid()
-  const slug = await uniqueSlug(c.env.DB, 'doctors', d.name.replace(/^dr\.?\s*/i, ''))
+  const slug = await doctorSlug(c.env.DB, d.name, d.primary_specialty_id ?? d.specialty_ids[0], null)
   const { cols, vals } = doctorColumns(d, c.get('user').id)
   const stmts = [
     c.env.DB.prepare(`INSERT INTO doctors (id, slug, source, created_by, ${cols.join(', ')}) VALUES (?, ?, 'manual', ?, ${cols.map(() => '?').join(', ')})`).bind(id, slug, c.get('user').id, ...vals),

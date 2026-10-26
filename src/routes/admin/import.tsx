@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../../env'
-import { all, one, uuid, uniqueSlug, toInt } from '../../lib/db'
+import { all, one, uuid, uniqueSlug, doctorSlug as makeDoctorSlug, toInt } from '../../lib/db'
 import { searchText, placeDetails, fetchPhoto, parsePlace, PlacesError, type Place } from '../../lib/places'
 import { parseDoctorForm, doctorColumns, relationStatements } from '../../lib/doctorForm'
 import { photoKey, putPhoto } from '../../lib/media'
@@ -253,7 +253,7 @@ importAdmin.post('/save', async (c) => {
   if (createDoctor && doctorInput && doctorInput.ok) {
     const d = doctorInput.value
     doctorId = uuid()
-    doctorSlug = await uniqueSlug(db, 'doctors', d.name.replace(/^dr\.?\s*/i, ''))
+    doctorSlug = await makeDoctorSlug(db, d.name, d.primary_specialty_id ?? d.specialty_ids[0], clinic.city_id)
     const { cols, vals } = doctorColumns(d, user.id)
     stmts.push(
       db.prepare(`INSERT INTO doctors (id, slug, source, created_by, google_place_id, google_rating, google_review_count, ${cols.join(', ')}) VALUES (?, ?, 'google_places', ?, ?, ?, ?, ${cols.map(() => '?').join(', ')})`)
