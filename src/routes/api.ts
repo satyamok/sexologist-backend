@@ -58,9 +58,20 @@ api.get('/cities', async (c) => {
        FROM areas a WHERE a.is_published = 1 ORDER BY a.name`,
     ...lc.params,
   )
+  // Doctors per city per specialty, so a city card can link to specialties that actually have doctors.
+  const specRows = await all<{ city_id: string; slug: string; name: string; plural: string; doctor_count: number }>(
+    c.env.DB,
+    `SELECT cl.city_id, s.slug, s.name, s.plural, COUNT(DISTINCT d.id) doctor_count
+       FROM doctors d JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id
+       JOIN doctor_specialties ds ON ds.doctor_id = d.id JOIN specialties s ON s.id = ds.specialty_id
+      WHERE d.is_published = 1 AND cl.is_published = 1${lc.sql}
+      GROUP BY cl.city_id, s.id ORDER BY doctor_count DESC, s.name`,
+    ...lc.params,
+  )
   const [cityNames, areaNames] = await Promise.all([allNameTranslations(c.env.DB, 'city_translations', locale), allNameTranslations(c.env.DB, 'area_translations', locale)])
   return ok(c, cities.map((ci) => ({
     id: ci.id, slug: ci.slug, name: cityNames.get(ci.id) ?? ci.name, state: ci.state, lat: ci.lat, lng: ci.lng, doctorCount: ci.doctor_count,
+    specialties: specRows.filter((s) => s.city_id === ci.id).map((s) => ({ slug: s.slug, name: s.name, plural: s.plural, doctorCount: s.doctor_count })),
     areas: areas.filter((a) => a.city_id === ci.id).map((a) => ({ slug: a.slug, name: areaNames.get(a.id) ?? a.name, zone: a.zone, doctorCount: a.doctor_count })),
   })))
 })
