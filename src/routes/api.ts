@@ -3,8 +3,10 @@ import type { AppEnv } from '../env'
 import { all, one, uuid, run, jsonStringArray, jsonObject } from '../lib/db'
 import { haversineKm } from '../lib/geo'
 import { resolveRedirect } from '../lib/slugs'
-import { runListing, type ListingParams, type Sort, type DoctorCard, rankCandidates, toCard, type CandidateRow, type Ref } from '../lib/listing'
+import { runListing, type ListingParams, type Sort, type DoctorCard, rankCandidates, toCard, translateCard, filterByLocale, type CandidateRow, type Ref } from '../lib/listing'
 import { photosByClinic, photosJson, type PhotoRow } from '../lib/photos'
+import { parseLocale, localesForLanguages, type LangCode } from '../lib/langs'
+import { localeFilterSql, doctorTranslations, clinicTranslations, nameTranslations, allNameTranslations, mergeTranslation, pick, type ClinicTranslation } from '../lib/translations'
 
 export const api = new Hono<AppEnv>()
 
@@ -23,24 +25,43 @@ api.use('*', async (c, next) => {
 
 const ok = (c: { json: (b: unknown, s?: 200) => Response }, data: unknown) => c.json({ ok: true, data })
 
+/** `locale=` query → code, or a 400 response. */
+function localeOf(c: { req: { query: (k: string) => string | undefined } }): LangCode | null {
+  return parseLocale(c.req.query('locale'))
+}
+const BAD_LOCALE = { ok: false, error: 'invalid locale' }
+
+/** " AND <locale filter>" for doctor-count subqueries, plus its bound params (empty for en). */
+function localeClause(locale: LangCode, alias = 'd'): { sql: string; params: (string | number | null)[] } {
+  const f = localeFilterSql(locale, alias)
+  return f ? { sql: ` AND ${f.sql}`, params: f.params } : { sql: '', params: [] }
+}
+
 api.get('/cities', async (c) => {
+  const locale = localeOf(c)
+  if (!locale) return c.json(BAD_LOCALE, 400)
+  const lc = localeClause(locale)
+  // doctorCount per city/area counts only doctors who speak the locale (everyone for en).
   const cities = await all<{ id: string; slug: string; name: string; state: string; lat: number | null; lng: number | null; doctor_count: number }>(
     c.env.DB,
     `SELECT ci.id, ci.slug, ci.name, ci.state, ci.lat, ci.lng,
             (SELECT COUNT(DISTINCT d.id) FROM doctors d JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id
-              WHERE d.is_published = 1 AND cl.is_published = 1 AND cl.city_id = ci.id) doctor_count
+              WHERE d.is_published = 1 AND cl.is_published = 1 AND cl.city_id = ci.id${lc.sql}) doctor_count
        FROM cities ci WHERE ci.is_published = 1 ORDER BY ci.name`,
+    ...lc.params,
   )
-  const areas = await all<{ city_id: string; slug: string; name: string; zone: string | null; doctor_count: number }>(
+  const areas = await all<{ id: string; city_id: string; slug: string; name: string; zone: string | null; doctor_count: number }>(
     c.env.DB,
-    `SELECT a.city_id, a.slug, a.name, a.zone,
+    `SELECT a.id, a.city_id, a.slug, a.name, a.zone,
             (SELECT COUNT(DISTINCT d.id) FROM doctors d JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id
-              WHERE d.is_published = 1 AND cl.is_published = 1 AND cl.area_id = a.id) doctor_count
+              WHERE d.is_published = 1 AND cl.is_published = 1 AND cl.area_id = a.id${lc.sql}) doctor_count
        FROM areas a WHERE a.is_published = 1 ORDER BY a.name`,
+    ...lc.params,
   )
+  const [cityNames, areaNames] = await Promise.all([allNameTranslations(c.env.DB, 'city_translations', locale), allNameTranslations(c.env.DB, 'area_translations', locale)])
   return ok(c, cities.map((ci) => ({
-    id: ci.id, slug: ci.slug, name: ci.name, state: ci.state, lat: ci.lat, lng: ci.lng, doctorCount: ci.doctor_count,
-    areas: areas.filter((a) => a.city_id === ci.id).map((a) => ({ slug: a.slug, name: a.name, zone: a.zone, doctorCount: a.doctor_count })),
+    id: ci.id, slug: ci.slug, name: cityNames.get(ci.id) ?? ci.name, state: ci.state, lat: ci.lat, lng: ci.lng, doctorCount: ci.doctor_count,
+    areas: areas.filter((a) => a.city_id === ci.id).map((a) => ({ slug: a.slug, name: areaNames.get(a.id) ?? a.name, zone: a.zone, doctorCount: a.doctor_count })),
   })))
 })
 
@@ -75,6 +96,10 @@ function parseListingParams(q: Record<string, string | undefined>): ListingParam
   if (q.lang && /^[a-z]{2,20}$/i.test(q.lang)) p.lang = q.lang
   if (q.rating && ['3', '4', '4.5'].includes(q.rating)) p.rating = Number(q.rating)
   if (q.sort && (SORTS as string[]).includes(q.sort)) p.sort = q.sort as Sort
+  // locale = page language (filters by spoken language + translates); distinct from the lang= spoken-language filter.
+  const locale = parseLocale(q.locale)
+  if (!locale) return 'invalid locale'
+  p.locale = locale
   if (q.page) {
     const n = Number.parseInt(q.page, 10)
     if (!Number.isFinite(n) || n < 1 || n > 500) return 'invalid page'
@@ -110,13 +135,13 @@ type DoctorRow = {
 
 type ClinicRow = {
   id: string; slug: string; name: string; address: string; pincode: string | null; locality: string | null; city_id: string; city_slug: string; city_name: string
-  area_slug: string | null; area_name: string | null; lat: number; lng: number; phone: string | null; whatsapp: string | null; website: string | null
+  area_id: string | null; area_slug: string | null; area_name: string | null; lat: number; lng: number; phone: string | null; whatsapp: string | null; website: string | null
   timings: string; google_maps_url: string | null; google_rating: number | null; google_review_count: number | null; photo_key: string | null
   photo_attribution: string | null; clinic_type: string | null; updated_at: string; fee?: number | null; is_primary?: number; doctor_timings?: string | null
 }
 
 const CLINIC_SELECT = `
-  SELECT c.id, c.slug, c.name, c.address, c.pincode, c.locality, c.city_id, ci.slug city_slug, ci.name city_name, a.slug area_slug, a.name area_name,
+  SELECT c.id, c.slug, c.name, c.address, c.pincode, c.locality, c.city_id, ci.slug city_slug, ci.name city_name, c.area_id, a.slug area_slug, a.name area_name,
          c.lat, c.lng, c.phone, c.whatsapp, c.website, c.timings, c.google_maps_url, c.google_rating, c.google_review_count, c.photo_key, c.photo_attribution, c.clinic_type, c.updated_at
     FROM clinics c JOIN cities ci ON ci.id = c.city_id LEFT JOIN areas a ON a.id = c.area_id`
 
@@ -132,6 +157,24 @@ function clinicJson(cl: ClinicRow, mediaUrl: string, photos: PhotoRow[] = []) {
     googleMapsUrl: cl.google_maps_url, googleRating: cl.google_rating, googleReviewCount: cl.google_review_count,
     photoUrl: gallery[0]?.url ?? (cl.photo_key ? `${mediaUrl}/${cl.photo_key}` : null), photoAttribution: gallery[0]?.attribution ?? cl.photo_attribution, clinicType: cl.clinic_type,
     fee: cl.fee ?? null, isPrimary: cl.is_primary === 1,
+  }
+}
+
+/**
+ * In place: clinic name/address/locality from clinic_translations, city/area names from their
+ * translation tables. Fields without a translation keep the English value.
+ */
+async function translateClinicRows(db: D1Database, clinics: ClinicRow[], ctrMap: Map<string, ClinicTranslation>, locale: LangCode): Promise<void> {
+  if (locale === 'en' || clinics.length === 0) return
+  const [cityNames, areaNames] = await Promise.all([
+    nameTranslations(db, 'city_translations', clinics.map((cl) => cl.city_id), locale),
+    nameTranslations(db, 'area_translations', clinics.map((cl) => cl.area_id).filter((x): x is string => x !== null), locale),
+  ])
+  for (const cl of clinics) {
+    const t = ctrMap.get(cl.id)
+    cl.name = pick(t?.name, cl.name); cl.address = pick(t?.address, cl.address); cl.locality = pick(t?.locality, cl.locality)
+    cl.city_name = cityNames.get(cl.city_id) ?? cl.city_name
+    if (cl.area_id) cl.area_name = areaNames.get(cl.area_id) ?? cl.area_name
   }
 }
 
@@ -155,9 +198,14 @@ api.get('/redirects/:entity/:slug', async (c) => {
 api.get('/doctors/:slug', async (c) => {
   const slug = c.req.param('slug')
   if (!SLUG.test(slug)) return c.json({ ok: false, error: 'invalid slug' }, 400)
+  const locale = localeOf(c)
+  if (!locale) return c.json(BAD_LOCALE, 400)
   const d = await one<DoctorRow>(c.env.DB, 'SELECT * FROM doctors WHERE slug = ? AND is_published = 1', slug)
   if (!d) return c.json({ ok: false, error: 'Not found' }, 404)
   const clinics = await all<ClinicRow>(c.env.DB, `${CLINIC_SELECT} JOIN doctor_clinics dc ON dc.clinic_id = c.id WHERE dc.doctor_id = ? AND c.is_published = 1 ORDER BY dc.is_primary DESC, c.name`, d.id)
+  const [dtr, ctrMap] = await Promise.all([doctorTranslations(c.env.DB, [d.id], locale), clinicTranslations(c.env.DB, clinics.map((cl) => cl.id), locale)])
+  await translateClinicRows(c.env.DB, clinics, ctrMap, locale)
+  const merged = mergeTranslation({ name: d.name, bio: d.bio, qualifications_note: null as string | null }, dtr.get(d.id), ['name', 'bio', 'qualifications_note'])
   // reuse the query that adds fee/is_primary/timings override
   const links = await all<{ clinic_id: string; consultation_fee: number | null; is_primary: number; timings: string | null }>(c.env.DB, 'SELECT clinic_id, consultation_fee, is_primary, timings FROM doctor_clinics WHERE doctor_id = ?', d.id)
   for (const cl of clinics) {
@@ -170,16 +218,21 @@ api.get('/doctors/:slug', async (c) => {
   const faqs = await all<{ question: string; answer: string }>(c.env.DB, 'SELECT question, answer FROM page_faqs WHERE page_key = ? ORDER BY sort_order', `doctor:${d.slug}`)
   const gal = await photosByClinic(c.env.DB, clinics.map((cl) => cl.id))
   const primaryClinic = clinics[0]
+  const languages = jsonStringArray(d.languages)
   const profile = {
-    id: d.id, slug: d.slug, name: d.name, gender: d.gender, patientsTreated: d.patients_treated,
+    locale,
+    translated: { name: merged.translated.name, bio: merged.translated.bio },
+    availableLocales: localesForLanguages(languages),
+    qualificationsNote: merged.value.qualifications_note,
+    id: d.id, slug: d.slug, name: merged.value.name, gender: d.gender, patientsTreated: d.patients_treated,
     photoUrl: d.photo_key ? `${c.env.MEDIA_URL}/${d.photo_key}` : null,
     qualifications: jsonStringArray(d.qualifications),
     primarySpecialty: refs.primary ?? refs.specialties[0] ?? { slug: 'sexologist', name: 'Sexologist' },
-    specialties: refs.specialties, experienceYears: d.experience_years, languages: jsonStringArray(d.languages),
+    specialties: refs.specialties, experienceYears: d.experience_years, languages,
     isVerified: d.is_verified === 1, verifiedAt: d.verified_at, updatedAt: d.updated_at, registrationNumber: d.registration_number, registrationCouncil: d.registration_council,
     videoConsult: d.video_consult === 1, videoFee: d.video_fee,
     ratingAvg: d.rating_avg, reviewCount: d.review_count, recommendPct: d.recommend_pct, googleRating: d.google_rating, googleReviewCount: d.google_review_count,
-    conditions: refs.conditions, bio: d.bio, phone: d.phone, whatsapp: d.whatsapp, website: d.website, googleMapsUrl: d.google_maps_url,
+    conditions: refs.conditions, bio: merged.value.bio, phone: d.phone, whatsapp: d.whatsapp, website: d.website, googleMapsUrl: d.google_maps_url,
     clinic: primaryClinic ? { ...clinicJson(primaryClinic, c.env.MEDIA_URL, gal.get(primaryClinic.id)), distanceKm: null } : null,
     clinicCount: clinics.length,
     clinics: clinics.map((cl) => clinicJson(cl, c.env.MEDIA_URL, gal.get(cl.id))),
@@ -192,9 +245,11 @@ api.get('/doctors/:slug', async (c) => {
 api.get('/clinics/:slug', async (c) => {
   const slug = c.req.param('slug')
   if (!SLUG.test(slug)) return c.json({ ok: false, error: 'invalid slug' }, 400)
+  const locale = localeOf(c)
+  if (!locale) return c.json(BAD_LOCALE, 400)
   const cl = await one<ClinicRow>(c.env.DB, `${CLINIC_SELECT} WHERE c.slug = ? AND c.is_published = 1`, slug)
   if (!cl) return c.json({ ok: false, error: 'Not found' }, 404)
-  const rows = await all<CandidateRow>(
+  const allRows = await all<CandidateRow>(
     c.env.DB,
     `SELECT d.id d_id, d.slug d_slug, d.name d_name, d.gender d_gender, d.patients_treated d_patients, d.photo_key d_photo_key,
             d.qualifications d_qualifications, d.registration_number d_reg_no, d.registration_council d_reg_council, d.is_verified d_verified,
@@ -206,50 +261,61 @@ api.get('/clinics/:slug', async (c) => {
       WHERE dc.clinic_id = ? AND d.is_published = 1`,
     cl.id,
   )
-  const ranked = rankCandidates(rows, { center: null, areaId: null, sort: 'relevance' })
+  // Same rule as listings: a /xx/clinic page shows only the doctors who speak xx. availableLocales = en + every language spoken here.
+  const availableLocales = localesForLanguages(allRows.flatMap((r) => jsonStringArray(r.d_languages)))
+  const ranked = rankCandidates(filterByLocale(allRows, locale), { center: null, areaId: null, sort: 'relevance' })
   const photos = (await photosByClinic(c.env.DB, [cl.id])).get(cl.id) ?? []
+  const ctrMap = await clinicTranslations(c.env.DB, [cl.id], locale)
+  const ctr = ctrMap.get(cl.id)
+  const merged = mergeTranslation({ name: cl.name, address: cl.address, locality: cl.locality }, ctr, ['name', 'address', 'locality'])
+  await translateClinicRows(c.env.DB, [cl], ctrMap, locale)
+  const dtrMap = await doctorTranslations(c.env.DB, ranked.map((r) => r.row.d_id), locale)
   const doctors: DoctorCard[] = []
   for (const r of ranked) {
     const refs = await refsFor(c.env.DB, r.row.d_id)
-    doctors.push(toCard(r, c.env.MEDIA_URL, refs.specialties, refs.primary, refs.conditions, photos))
+    doctors.push(translateCard(toCard(r, c.env.MEDIA_URL, refs.specialties, refs.primary, refs.conditions, photos), dtrMap.get(r.row.d_id), ctr))
   }
-  return ok(c, { ...clinicJson(cl, c.env.MEDIA_URL, photos), doctors })
+  return ok(c, { locale, translated: merged.translated, availableLocales, ...clinicJson(cl, c.env.MEDIA_URL, photos), doctors })
 })
 
 // ---- sitemap ----
 
 api.get('/sitemap', async (c) => {
   const type = c.req.query('type')
+  const locale = localeOf(c)
+  if (!locale) return c.json(BAD_LOCALE, 400)
   const db = c.env.DB
-  const site = c.env.SITE_URL
+  // Non-English entries live under the language prefix (/hi/delhi/sexologist) and count only doctors who speak that language.
+  const site = locale === 'en' ? c.env.SITE_URL : `${c.env.SITE_URL}/${locale}`
+  const lc = localeClause(locale)
   const min = Number(c.env.MIN_DOCTORS_PER_PAGE) || 3
   type Row = { loc: string; lastmod: string | null; n?: number }
   let rows: Row[] = []
   switch (type) {
     case 'cities':
-      rows = (await all<{ slug: string; n: number }>(db, `SELECT ci.slug, (SELECT COUNT(DISTINCT d.id) FROM doctors d JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id WHERE d.is_published = 1 AND cl.is_published = 1 AND cl.city_id = ci.id) n FROM cities ci WHERE ci.is_published = 1`))
+      rows = (await all<{ slug: string; n: number }>(db, `SELECT ci.slug, (SELECT COUNT(DISTINCT d.id) FROM doctors d JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id WHERE d.is_published = 1 AND cl.is_published = 1 AND cl.city_id = ci.id${lc.sql}) n FROM cities ci WHERE ci.is_published = 1`, ...lc.params))
         .filter((r) => r.n >= min).map((r) => ({ loc: `${site}/${r.slug}/sexologist`, lastmod: null }))
       break
     case 'areas': {
       // Same inclusion rule as the listing: clinic inside the area OR within its radius.
       const areas = await all<{ id: string; city_id: string; city: string; slug: string; lat: number; lng: number; r: number }>(db, 'SELECT a.id, a.city_id, ci.slug city, a.slug, a.lat, a.lng, a.default_radius_km r FROM areas a JOIN cities ci ON ci.id = a.city_id WHERE a.is_published = 1 AND ci.is_published = 1')
       const places = await all<{ d: string; city_id: string; area_id: string | null; lat: number; lng: number }>(db, `SELECT d.id d, cl.city_id, cl.area_id, cl.lat, cl.lng FROM doctors d JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id
-         WHERE d.is_published = 1 AND cl.is_published = 1 AND EXISTS (SELECT 1 FROM doctor_specialties ds JOIN specialties s ON s.id = ds.specialty_id WHERE ds.doctor_id = d.id AND s.slug = 'sexologist')`)
+         WHERE d.is_published = 1 AND cl.is_published = 1 AND EXISTS (SELECT 1 FROM doctor_specialties ds JOIN specialties s ON s.id = ds.specialty_id WHERE ds.doctor_id = d.id AND s.slug = 'sexologist')${lc.sql}`, ...lc.params)
       rows = areas
         .map((a) => ({ a, n: new Set(places.filter((p) => p.city_id === a.city_id && (p.area_id === a.id || haversineKm(a, p) <= a.r)).map((p) => p.d)).size }))
         .filter((x) => x.n >= min).map((x) => ({ loc: `${site}/${x.a.city}/sexologist/${x.a.slug}`, lastmod: null }))
       break
     }
     case 'doctors':
-      rows = (await all<{ slug: string; updated_at: string }>(db, 'SELECT slug, updated_at FROM doctors WHERE is_published = 1 ORDER BY updated_at DESC'))
+      rows = (await all<{ slug: string; updated_at: string }>(db, `SELECT d.slug, d.updated_at FROM doctors d WHERE d.is_published = 1${lc.sql} ORDER BY d.updated_at DESC`, ...lc.params))
         .map((r) => ({ loc: `${site}/doctor/${r.slug}`, lastmod: r.updated_at }))
       break
     case 'clinics':
-      rows = (await all<{ slug: string; updated_at: string }>(db, 'SELECT c.slug, c.updated_at FROM clinics c WHERE c.is_published = 1 AND EXISTS (SELECT 1 FROM doctor_clinics dc JOIN doctors d ON d.id = dc.doctor_id WHERE dc.clinic_id = c.id AND d.is_published = 1)'))
+      rows = (await all<{ slug: string; updated_at: string }>(db, `SELECT c.slug, c.updated_at FROM clinics c WHERE c.is_published = 1 AND EXISTS (SELECT 1 FROM doctor_clinics dc JOIN doctors d ON d.id = dc.doctor_id WHERE dc.clinic_id = c.id AND d.is_published = 1${lc.sql})`, ...lc.params))
         .map((r) => ({ loc: `${site}/clinic/${r.slug}`, lastmod: r.updated_at }))
       break
     case 'conditions':
-      rows = (await all<{ city: string; cond: string; n: number }>(db, `SELECT ci.slug city, cn.slug cond, (SELECT COUNT(DISTINCT d.id) FROM doctors d JOIN doctor_conditions dcn ON dcn.doctor_id = d.id AND dcn.condition_id = cn.id JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id WHERE d.is_published = 1 AND cl.is_published = 1 AND cl.city_id = ci.id) n FROM cities ci CROSS JOIN conditions cn WHERE ci.is_published = 1`))
+      rows = (await all<{ city: string; cond: string; n: number }>(db, `SELECT ci.slug city, cn.slug cond, (SELECT COUNT(DISTINCT d.id) FROM doctors d JOIN doctor_conditions dcn ON dcn.doctor_id = d.id AND dcn.condition_id = cn.id JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id WHERE d.is_published = 1 AND cl.is_published = 1 AND cl.city_id = ci.id${lc.sql}) n FROM cities ci CROSS JOIN conditions cn WHERE ci.is_published = 1`, ...lc.params))
         .filter((r) => r.n >= min).map((r) => ({ loc: `${site}/${r.city}/${r.cond}-doctor`, lastmod: null }))
       break
     default:

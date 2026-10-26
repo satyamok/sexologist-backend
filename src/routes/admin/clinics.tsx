@@ -6,6 +6,9 @@ import { photoKey, putPhoto, deletePhoto, readUploads } from '../../lib/media'
 import { MAX_PHOTOS_PER_CLINIC, listPhotos, insertPhotoStmt, reorderStmts, reorderIds, remainingSlots, syncCoverStmt, type PhotoRow } from '../../lib/photos'
 import { AdminLayout, Field, Select } from './layout'
 import { lookups, redirectWithFlash, ID_RE, CLINIC_TYPES, type AreaOpt } from './common'
+import { ClinicTranslations } from './translations'
+import type { ClinicTranslation } from '../../lib/translations'
+import { translatableLang, parseClinicTranslation, isEmptyTranslation } from '../../lib/translationForm'
 
 export const clinicsAdmin = new Hono<AppEnv>()
 
@@ -234,6 +237,7 @@ clinicsAdmin.get('/:id', async (c) => {
   const lk = await lookups(c.env.DB)
   const doctors = await all<{ id: string; name: string; consultation_fee: number | null }>(c.env.DB, 'SELECT d.id, d.name, dc.consultation_fee FROM doctor_clinics dc JOIN doctors d ON d.id = dc.doctor_id WHERE dc.clinic_id = ? ORDER BY d.name', cl.id)
   const photos = await listPhotos(c.env.DB, 'clinic', cl.id)
+  const translations = await all<ClinicTranslation>(c.env.DB, 'SELECT * FROM clinic_translations WHERE clinic_id = ? ORDER BY lang', cl.id)
   return c.html(
     <AdminLayout title={cl.name} user={c.get('user')} flash={c.req.query('flash')} error={c.req.query('error')}>
       <h1>{cl.name}</h1>
@@ -242,6 +246,7 @@ clinicsAdmin.get('/:id', async (c) => {
         <ClinicFields v={{ ...cl, timings: JSON.stringify(jsonObject(cl.timings)) }} cities={lk.cities} areas={lk.areas} withMap />
         <div class="actions"><button class="btn" type="submit">Save clinic</button></div>
       </form>
+      <ClinicTranslations clinicId={cl.id} rows={translations} />
       <ClinicPhotos clinic={cl} photos={photos} mediaUrl={c.env.MEDIA_URL} />
       <div class="card">
         <h2 style="margin-top:0">Doctors here ({doctors.length})</h2>
@@ -269,6 +274,24 @@ clinicsAdmin.post('/:id', async (c) => {
     v.name, v.address, v.pincode, v.area_id, v.city_id, v.locality, v.lat, v.lng, v.phone, v.whatsapp, v.website, v.timings, v.clinic_type, v.is_published, v.google_maps_url, cl.id,
   )
   return c.redirect(redirectWithFlash(`/admin/clinics/${cl.id}`, 'Clinic saved.'))
+})
+
+clinicsAdmin.post('/:id/translations/:lang', async (c) => {
+  const cl = await loadClinic(c.env.DB, c.req.param('id'))
+  const lang = translatableLang(c.req.param('lang'))
+  if (!cl || !lang) return c.notFound()
+  const v = parseClinicTranslation(await c.req.parseBody())
+  if (isEmptyTranslation(v)) {
+    await run(c.env.DB, 'DELETE FROM clinic_translations WHERE clinic_id = ? AND lang = ?', cl.id, lang)
+    return c.redirect(redirectWithFlash(`/admin/clinics/${cl.id}`, `${lang} translation cleared.`))
+  }
+  await run(
+    c.env.DB,
+    `INSERT INTO clinic_translations (clinic_id, lang, name, address, locality) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT (clinic_id, lang) DO UPDATE SET name = excluded.name, address = excluded.address, locality = excluded.locality, updated_at = datetime('now')`,
+    cl.id, lang, v.name, v.address, v.locality,
+  )
+  return c.redirect(redirectWithFlash(`/admin/clinics/${cl.id}`, `${lang} translation saved.`))
 })
 
 // ---------- Clinic photos (gallery) ----------
@@ -378,6 +401,7 @@ clinicsAdmin.post('/:id/delete', async (c) => {
     c.env.DB.prepare("DELETE FROM photos WHERE owner_type = 'clinic' AND owner_id = ?").bind(cl.id),
     c.env.DB.prepare('DELETE FROM doctor_clinics WHERE clinic_id = ?').bind(cl.id),
     c.env.DB.prepare('UPDATE bookings SET clinic_id = NULL WHERE clinic_id = ?').bind(cl.id),
+    c.env.DB.prepare('DELETE FROM clinic_translations WHERE clinic_id = ?').bind(cl.id),
     c.env.DB.prepare('DELETE FROM clinics WHERE id = ?').bind(cl.id),
   ])
   return c.redirect(redirectWithFlash('/admin/clinics', `Deleted ${cl.name}.`))

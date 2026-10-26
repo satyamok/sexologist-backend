@@ -6,6 +6,8 @@
 import { all, one, jsonStringArray, type SqlValue } from './db'
 import { photosByClinic, photosJson, type PhotoRow, type PhotoJson } from './photos'
 import { haversineKm, boundingBox, roundKm } from './geo'
+import { LANG_CODES, speaksLocale, localesForLanguages, type LangCode } from './langs'
+import { doctorTranslations, clinicTranslations, nameTranslations, pick, type DoctorTranslation, type ClinicTranslation } from './translations'
 
 export const PER_PAGE = 20
 
@@ -26,6 +28,8 @@ export type ListingParams = {
   rating?: number
   sort?: Sort
   page?: number
+  /** Site language of the page (default 'en'). Non-English locales keep only doctors who speak that language. */
+  locale?: LangCode
 }
 
 export type CityRow = { id: string; slug: string; name: string; state: string; lat: number | null; lng: number | null }
@@ -104,6 +108,9 @@ export type ListingResult = {
   otherSpecialties: { slug: string; name: string; doctorCount: number }[]
   faqs: { q: string; a: string }[]
   aggregate: { ratingAvg: number | null; reviewCount: number }
+  locale: LangCode
+  /** Distinct doctors in the same scope (all filters except locale) who speak each site language; 'en' = everyone. */
+  langCounts: Record<LangCode, number>
 }
 
 // ---------- pure ranking (unit tested) ----------
@@ -167,6 +174,34 @@ export function compareCards(a: Collapsed, b: Collapsed, ctx: RankCtx): number {
 
 export function rankCandidates(rows: CandidateRow[], ctx: RankCtx): Collapsed[] {
   return collapseByDoctor(rows, ctx).sort((a, b) => compareCards(a, b, ctx))
+}
+
+/** Distinct doctors per site language; 'en' counts every doctor. Scope = whatever rows the caller passes. */
+export function langCountsFor(rows: readonly { d_id: string; d_languages: string }[]): Record<LangCode, number> {
+  const seen = new Set<string>()
+  const counts = Object.fromEntries(LANG_CODES.map((c) => [c, 0])) as Record<LangCode, number>
+  for (const r of rows) {
+    if (seen.has(r.d_id)) continue
+    seen.add(r.d_id)
+    for (const code of localesForLanguages(jsonStringArray(r.d_languages))) counts[code] += 1
+  }
+  return counts
+}
+
+/** Keep only (doctor, clinic) rows whose doctor speaks the locale. 'en' keeps everything. */
+export function filterByLocale<T extends { d_languages: string }>(rows: readonly T[], locale: LangCode): T[] {
+  if (locale === 'en') return [...rows]
+  return rows.filter((r) => speaksLocale(jsonStringArray(r.d_languages), locale))
+}
+
+/** Overlay admin translations on a card: doctor name, clinic name/locality/address. Missing fields fall back to English. */
+export function translateCard(card: DoctorCard, dtr: DoctorTranslation | null | undefined, ctr: ClinicTranslation | null | undefined): DoctorCard {
+  if (!dtr && !ctr) return card
+  return {
+    ...card,
+    name: pick(dtr?.name, card.name),
+    clinic: { ...card.clinic, name: pick(ctr?.name, card.clinic.name), locality: pick(ctr?.locality, card.clinic.locality), address: pick(ctr?.address, card.clinic.address) },
+  }
 }
 
 export function toCard(
@@ -344,19 +379,28 @@ export async function runListing(deps: ListingDeps, p: ListingParams): Promise<L
   if (area) {
     rows = rows.filter((r) => r.c_area_id === area.id || haversineKm(center!, { lat: r.c_lat, lng: r.c_lng }) <= area.default_radius_km)
   }
+  const locale: LangCode = p.locale ?? 'en'
+  // langCounts covers the whole scope (before the locale filter) so hreflang alternates only point at pages with doctors.
+  const langCounts = langCountsFor(rows)
+  rows = filterByLocale(rows, locale)
   const ranked = rankCandidates(rows, ctx)
   const total = ranked.length
   const page = Math.max(1, p.page ?? 1)
   const slice = ranked.slice((page - 1) * PER_PAGE, page * PER_PAGE)
 
   const ids = slice.map((c) => c.row.d_id)
-  const [specMap, primMap, condMap, photoMap] = await Promise.all([
+  const clinicIds = slice.map((c) => c.row.c_id)
+  const [specMap, primMap, condMap, photoMap, dtrMap, ctrMap] = await Promise.all([
     doctorRefs(db, 'doctor_specialties', 'specialties', 'specialty_id', ids),
     doctorPrimary(db, ids),
     doctorRefs(db, 'doctor_conditions', 'conditions', 'condition_id', ids),
-    photosByClinic(db, slice.map((c) => c.row.c_id)),
+    photosByClinic(db, clinicIds),
+    doctorTranslations(db, ids, locale),
+    clinicTranslations(db, clinicIds, locale),
   ])
-  const items = slice.map((c) => toCard(c, deps.mediaUrl, specMap.get(c.row.d_id) ?? [], primMap.get(c.row.d_id) ?? null, condMap.get(c.row.d_id) ?? [], photoMap.get(c.row.c_id) ?? []))
+  const items = slice.map((c) =>
+    translateCard(toCard(c, deps.mediaUrl, specMap.get(c.row.d_id) ?? [], primMap.get(c.row.d_id) ?? null, condMap.get(c.row.d_id) ?? [], photoMap.get(c.row.c_id) ?? []), dtrMap.get(c.row.d_id), ctrMap.get(c.row.c_id)),
+  )
 
   const rated = ranked.filter((c) => c.row.d_rating !== null)
   const aggregate = {
@@ -371,10 +415,20 @@ export async function runListing(deps: ListingDeps, p: ListingParams): Promise<L
   ])
   const faqs = faqRows.length ? faqRows.map((f) => ({ q: f.question, a: f.answer })) : fallbackFaqs({ specialty, condition, city, area, total })
 
+  // City / area names in the page language (nearby areas too). English stays when no row exists.
+  const [cityNames, areaNames] = await Promise.all([
+    nameTranslations(db, 'city_translations', city ? [city.id] : [], locale),
+    nameTranslations(db, 'area_translations', [...(area ? [area.id] : []), ...nearbyAreas.map((a) => a.id)], locale),
+  ])
+  const cityOut = city ? { ...city, name: cityNames.get(city.id) ?? city.name } : null
+  const areaOut = area ? { ...area, name: areaNames.get(area.id) ?? area.name } : null
+
   return {
-    city, area, specialty, condition, total, page, perPage: PER_PAGE,
+    city: cityOut, area: areaOut, specialty, condition, total, page, perPage: PER_PAGE,
     indexable: isIndexable(total, deps.minDoctors, p),
-    items, nearbyAreas, otherSpecialties, faqs, aggregate,
+    items,
+    nearbyAreas: nearbyAreas.map(({ id, ...a }) => ({ ...a, name: areaNames.get(id) ?? a.name })),
+    otherSpecialties, faqs, aggregate, locale, langCounts,
   }
 }
 
@@ -410,7 +464,7 @@ async function nearbyAreasFor(db: D1Database, city: CityRow | null, area: AreaRo
   const center = area ? { lat: area.lat, lng: area.lng } : city.lat !== null && city.lng !== null ? { lat: city.lat, lng: city.lng } : null
   return rows
     .filter((r) => r.id !== area?.id)
-    .map((r) => ({ slug: r.slug, name: r.name, distanceKm: center ? roundKm(haversineKm(center, r)) : 0, doctorCount: r.doctor_count }))
+    .map((r) => ({ id: r.id, slug: r.slug, name: r.name, distanceKm: center ? roundKm(haversineKm(center, r)) : 0, doctorCount: r.doctor_count }))
     .sort((a, b) => a.distanceKm - b.distanceKm)
     .slice(0, 8)
 }

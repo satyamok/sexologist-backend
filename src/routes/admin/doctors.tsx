@@ -7,6 +7,9 @@ import { AdminLayout, yesNo } from './layout'
 import { DoctorFields } from './doctorFormView'
 import { lookups, redirectWithFlash, ID_RE } from './common'
 import { changeSlug, normaliseSlug, oldSlugsFor } from '../../lib/slugs'
+import { DoctorTranslations } from './translations'
+import type { DoctorTranslation } from '../../lib/translations'
+import { translatableLang, parseDoctorTranslation, isEmptyTranslation } from '../../lib/translationForm'
 
 export const doctorsAdmin = new Hono<AppEnv>()
 
@@ -149,6 +152,7 @@ doctorsAdmin.get('/:id', async (c) => {
     ? await all<{ id: string; name: string; address: string; city_name: string }>(db, 'SELECT cl.id, cl.name, cl.address, ci.name city_name FROM clinics cl JOIN cities ci ON ci.id = cl.city_id WHERE cl.name LIKE ? AND cl.id NOT IN (SELECT clinic_id FROM doctor_clinics WHERE doctor_id = ?) ORDER BY cl.name LIMIT 20', `%${clinicQ}%`, d.id)
     : []
   const oldSlugs = await oldSlugsFor(db, 'doctor', d.id)
+  const translations = await all<DoctorTranslation>(db, 'SELECT * FROM doctor_translations WHERE doctor_id = ? ORDER BY lang', d.id)
   const v = {
     ...d,
     qualifications: jsonStringArray(d.qualifications),
@@ -178,6 +182,8 @@ doctorsAdmin.get('/:id', async (c) => {
         <DoctorFields v={v} specialties={lk.specialties} conditions={lk.conditions} />
         <div class="actions"><button class="btn" type="submit">Save profile</button></div>
       </form>
+
+      <DoctorTranslations doctorId={d.id} languages={v.languages} rows={translations} />
 
       <div class="card">
         <h2 style="margin-top:0">Profile picture</h2>
@@ -298,6 +304,25 @@ doctorsAdmin.post('/:id/slug', async (c) => {
   return c.redirect(redirectWithFlash(`/admin/doctors/${d.id}`, slug === d.slug ? 'URL unchanged.' : `URL changed to /doctor/${slug}. The old URL now redirects.`))
 })
 
+/** Save one language's translation. All-empty + not reviewed deletes the row (= full English fallback). */
+doctorsAdmin.post('/:id/translations/:lang', async (c) => {
+  const d = await loadDoctor(c.env.DB, c.req.param('id'))
+  const lang = translatableLang(c.req.param('lang'))
+  if (!d || !lang) return c.notFound()
+  const v = parseDoctorTranslation(await c.req.parseBody())
+  if (isEmptyTranslation(v)) {
+    await run(c.env.DB, 'DELETE FROM doctor_translations WHERE doctor_id = ? AND lang = ?', d.id, lang)
+    return c.redirect(redirectWithFlash(`/admin/doctors/${d.id}`, `${lang} translation cleared.`))
+  }
+  await run(
+    c.env.DB,
+    `INSERT INTO doctor_translations (doctor_id, lang, name, bio, qualifications_note, is_reviewed) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (doctor_id, lang) DO UPDATE SET name = excluded.name, bio = excluded.bio, qualifications_note = excluded.qualifications_note, is_reviewed = excluded.is_reviewed, updated_at = datetime('now')`,
+    d.id, lang, v.name, v.bio, v.qualifications_note, v.is_reviewed,
+  )
+  return c.redirect(redirectWithFlash(`/admin/doctors/${d.id}`, `${lang} translation saved.`))
+})
+
 doctorsAdmin.post('/:id/toggle', async (c) => {
   const d = await loadDoctor(c.env.DB, c.req.param('id'))
   if (!d) return c.notFound()
@@ -379,6 +404,7 @@ doctorsAdmin.post('/:id/delete', async (c) => {
     c.env.DB.prepare('DELETE FROM doctor_conditions WHERE doctor_id = ?').bind(d.id),
     c.env.DB.prepare('DELETE FROM reviews WHERE doctor_id = ?').bind(d.id),
     c.env.DB.prepare('DELETE FROM bookings WHERE doctor_id = ?').bind(d.id),
+    c.env.DB.prepare('DELETE FROM doctor_translations WHERE doctor_id = ?').bind(d.id),
     c.env.DB.prepare('DELETE FROM doctors WHERE id = ?').bind(d.id),
   ])
   return c.redirect(redirectWithFlash('/admin/doctors', `Deleted ${d.name}.`))

@@ -13,7 +13,9 @@
     "db:seed": "wrangler d1 execute sexologistindia-db --file=seed/seed.sql --remote",
     "db:seed:doctors:local": "wrangler d1 execute sexologistindia-db --file=seed/seed-doctors.sql --local",
     "db:seed:doctors": "wrangler d1 execute sexologistindia-db --file=seed/seed-doctors.sql --remote",
-    "seed:admin": "node scripts/seed-admin.mjs"
+    "seed:admin": "node scripts/seed-admin.mjs",
+    "db:seed:translations:local": "wrangler d1 execute sexologistindia-db --file=seed/seed-translations.sql --local",
+    "db:seed:translations": "wrangler d1 execute sexologistindia-db --file=seed/seed-translations.sql --remote"
   },
   "dependencies": {
     "hono": "^4.13.14"

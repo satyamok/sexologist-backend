@@ -4,6 +4,15 @@ import { all, one, run, uuid, slugify, toFloat, str, bool } from '../../lib/db'
 import { isValidLatLng } from '../../lib/geo'
 import { AdminLayout, Field } from './layout'
 import { redirectWithFlash, ID_RE } from './common'
+import { NameTranslationInputs } from './translations'
+import { parseNameTranslations, nameTranslationStmts } from '../../lib/translationForm'
+
+/** lang → name for one city/area. */
+async function namesFor(db: D1Database, table: 'city_translations' | 'area_translations', id: string): Promise<Map<string, string>> {
+  const col = table === 'city_translations' ? 'city_id' : 'area_id'
+  const rows = await all<{ lang: string; name: string }>(db, `SELECT lang, name FROM ${table} WHERE ${col} = ?`, id)
+  return new Map(rows.map((r) => [r.lang, r.name]))
+}
 
 export const citiesAdmin = new Hono<AppEnv>()
 
@@ -63,6 +72,8 @@ citiesAdmin.get('/:id', async (c) => {
   const areas = await all<Area>(c.env.DB, 'SELECT * FROM areas WHERE city_id = ? ORDER BY name', city.id)
   const editId = c.req.query('area')
   const editing = editId ? areas.find((a) => a.id === editId) ?? null : null
+  const cityNames = await namesFor(c.env.DB, 'city_translations', city.id)
+  const areaNames = editing ? await namesFor(c.env.DB, 'area_translations', editing.id) : new Map<string, string>()
   return c.html(
     <AdminLayout title={city.name} user={c.get('user')} flash={c.req.query('flash')} error={c.req.query('error')}>
       <h1>{city.name} <span class="muted">/{city.slug}</span></h1>
@@ -74,6 +85,7 @@ citiesAdmin.get('/:id', async (c) => {
           <Field label="Longitude"><input type="text" name="lng" value={city.lng ?? ''} inputmode="decimal" required /></Field>
         </div>
         <Field label="Intro HTML (optional, shown on the city page)"><textarea name="intro_html">{city.intro_html ?? ''}</textarea></Field>
+        <NameTranslationInputs names={cityNames} />
         <label class="check"><input type="checkbox" name="is_published" checked={city.is_published === 1} />Published</label>
         <div class="actions"><button class="btn" type="submit">Save city</button></div>
       </form>
@@ -111,6 +123,7 @@ citiesAdmin.get('/:id', async (c) => {
           <Field label="Longitude"><input type="text" name="lng" value={editing?.lng ?? ''} inputmode="decimal" required /></Field>
         </div>
         <Field label="Intro HTML (optional)"><textarea name="intro_html">{editing?.intro_html ?? ''}</textarea></Field>
+        <NameTranslationInputs names={areaNames} />
         <label class="check"><input type="checkbox" name="is_published" checked={(editing?.is_published ?? 1) === 1} />Published</label>
         <div class="actions"><button class="btn" type="submit">{editing ? 'Save area' : 'Add area'}</button>{editing ? <a class="btn secondary" href={`/admin/cities/${city.id}`}>Cancel</a> : null}</div>
       </form>
@@ -124,7 +137,10 @@ citiesAdmin.post('/:id', async (c) => {
   const b = await c.req.parseBody()
   const name = str(b.name), state = str(b.state), lat = toFloat(b.lat), lng = toFloat(b.lng)
   if (!name || !state || !isValidLatLng(lat, lng)) return c.redirect(`/admin/cities/${id}?error=${encodeURIComponent('Name, state and valid coordinates are required.')}`)
-  await run(c.env.DB, 'UPDATE cities SET name = ?, state = ?, lat = ?, lng = ?, intro_html = ?, is_published = ? WHERE id = ?', name, state, lat, lng, str(b.intro_html), bool(b.is_published), id)
+  await c.env.DB.batch([
+    c.env.DB.prepare('UPDATE cities SET name = ?, state = ?, lat = ?, lng = ?, intro_html = ?, is_published = ? WHERE id = ?').bind(name, state, lat, lng, str(b.intro_html), bool(b.is_published), id),
+    ...nameTranslationStmts(c.env.DB, 'city_translations', id, parseNameTranslations(b)),
+  ])
   return c.redirect(redirectWithFlash(`/admin/cities/${id}`, 'City saved.'))
 })
 
@@ -141,22 +157,31 @@ function parseArea(b: Record<string, string | File>): { ok: true; v: Omit<Area, 
 citiesAdmin.post('/:id/areas', async (c) => {
   const cityId = c.req.param('id')
   if (!ID_RE.test(cityId) || !(await one(c.env.DB, 'SELECT id FROM cities WHERE id = ?', cityId))) return c.notFound()
-  const parsed = parseArea(await c.req.parseBody())
+  const body = await c.req.parseBody()
+  const parsed = parseArea(body)
   if (!parsed.ok) return c.redirect(`/admin/cities/${cityId}?error=${encodeURIComponent(parsed.error)}`)
   const v = parsed.v
   const slug = slugify(v.name)
   if (await one(c.env.DB, 'SELECT id FROM areas WHERE city_id = ? AND slug = ?', cityId, slug)) return c.redirect(`/admin/cities/${cityId}?error=${encodeURIComponent('An area with this slug already exists in this city.')}`)
-  await run(c.env.DB, 'INSERT INTO areas (id, city_id, name, slug, pincode, zone, lat, lng, default_radius_km, is_published, intro_html) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', `ar_${uuid().slice(0, 8)}`, cityId, v.name, slug, v.pincode, v.zone, v.lat, v.lng, v.default_radius_km, v.is_published, v.intro_html)
+  const areaId = `ar_${uuid().slice(0, 8)}`
+  await c.env.DB.batch([
+    c.env.DB.prepare('INSERT INTO areas (id, city_id, name, slug, pincode, zone, lat, lng, default_radius_km, is_published, intro_html) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(areaId, cityId, v.name, slug, v.pincode, v.zone, v.lat, v.lng, v.default_radius_km, v.is_published, v.intro_html),
+    ...nameTranslationStmts(c.env.DB, 'area_translations', areaId, parseNameTranslations(body)),
+  ])
   return c.redirect(redirectWithFlash(`/admin/cities/${cityId}`, `Area ${v.name} added.`))
 })
 
 citiesAdmin.post('/:id/areas/:areaId', async (c) => {
   const cityId = c.req.param('id'), areaId = c.req.param('areaId')
   if (!ID_RE.test(cityId) || !ID_RE.test(areaId)) return c.notFound()
-  const parsed = parseArea(await c.req.parseBody())
+  const body = await c.req.parseBody()
+  const parsed = parseArea(body)
   if (!parsed.ok) return c.redirect(`/admin/cities/${cityId}?area=${areaId}&error=${encodeURIComponent(parsed.error)}`)
   const v = parsed.v
-  await run(c.env.DB, 'UPDATE areas SET name = ?, pincode = ?, zone = ?, lat = ?, lng = ?, default_radius_km = ?, is_published = ?, intro_html = ? WHERE id = ? AND city_id = ?', v.name, v.pincode, v.zone, v.lat, v.lng, v.default_radius_km, v.is_published, v.intro_html, areaId, cityId)
+  await c.env.DB.batch([
+    c.env.DB.prepare('UPDATE areas SET name = ?, pincode = ?, zone = ?, lat = ?, lng = ?, default_radius_km = ?, is_published = ?, intro_html = ? WHERE id = ? AND city_id = ?').bind(v.name, v.pincode, v.zone, v.lat, v.lng, v.default_radius_km, v.is_published, v.intro_html, areaId, cityId),
+    ...nameTranslationStmts(c.env.DB, 'area_translations', areaId, parseNameTranslations(body)),
+  ])
   return c.redirect(redirectWithFlash(`/admin/cities/${cityId}`, 'Area saved.'))
 })
 
@@ -165,6 +190,7 @@ citiesAdmin.post('/:id/areas/:areaId/delete', async (c) => {
   if (!ID_RE.test(cityId) || !ID_RE.test(areaId)) return c.notFound()
   await c.env.DB.batch([
     c.env.DB.prepare('UPDATE clinics SET area_id = NULL WHERE area_id = ?').bind(areaId),
+    c.env.DB.prepare('DELETE FROM area_translations WHERE area_id = ?').bind(areaId),
     c.env.DB.prepare('DELETE FROM areas WHERE id = ? AND city_id = ?').bind(areaId, cityId),
   ])
   return c.redirect(redirectWithFlash(`/admin/cities/${cityId}`, 'Area deleted.'))

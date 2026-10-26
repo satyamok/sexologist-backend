@@ -11,6 +11,7 @@ npm install
 cp .dev.vars.example .dev.vars      # fill in secrets for local dev
 npm run db:migrate:local            # create tables in the local D1
 npm run db:seed:local               # specialties, conditions, cities, areas
+npm run db:seed:translations:local  # city/area names in hi, ta, te, mr, kn, bn, ml, pa, gu
 ADMIN_EMAIL=you@example.com ADMIN_PASSWORD='min 10 chars' ADMIN_NAME='You' npm run seed:admin -- --local
 npm run dev                         # http://localhost:8787
 ```
@@ -27,6 +28,7 @@ Open http://localhost:8787/admin/login and sign in with the seeded account.
 | `npm run db:migrate:local` / `db:migrate` | apply `migrations/*.sql` to local / remote D1 |
 | `npm run db:seed:local` / `db:seed` | run `seed/seed.sql` (idempotent `INSERT OR IGNORE`) |
 | `npm run db:seed:doctors:local` / `db:seed:doctors` | run `seed/seed-doctors.sql` — **sample doctors for development only**, see below |
+| `npm run db:seed:translations:local` / `db:seed:translations` | run `seed/seed-translations.sql` — city/area names in the 9 Indian languages (idempotent) |
 | `npm run seed:admin [-- --local]` | upsert a `master_admin` user (env: `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_NAME`) |
 | `npm run deploy` | `wrangler deploy` |
 
@@ -51,6 +53,9 @@ Production: `npx wrangler secret put GOOGLE_PLACES_API_KEY` (and `SESSION_SECRET
 
 - `migrations/0001_init.sql` — full schema (users, cities, areas, specialties, conditions, doctors, clinics, doctor_clinics, doctor_specialties, doctor_conditions, reviews, page_faqs, place_imports, sessions, bookings) and indexes. Add new migrations as `migrations/000N_*.sql`; never edit an applied file.
 - `migrations/0002_photos.sql` — `photos` table (clinic photo galleries: `owner_type`, `owner_id`, `key`, `caption`, `attribution`, `sort_order`) and a data migration that turns every existing `clinics.photo_key` into the first gallery photo. Apply to production with `npm run db:migrate`.
+- `migrations/0003_slug_redirects.sql` — `slug_redirects` (old doctor/clinic slugs → 301).
+- `migrations/0004_translations.sql` — `doctor_translations` (name, bio, qualifications_note, is_reviewed per `lang`), `clinic_translations` (name, address, locality), `city_translations` and `area_translations` (name). `lang` is a site language code (`hi`, `ta`, …, never `en`); a NULL column means "fall back to English". Apply to production with `npm run db:migrate`, then `npm run db:seed:translations`.
+- `seed/seed-translations.sql` — hand-written city and area names (10 cities, 27 areas) in hi, ta, te, mr, kn, bn, ml, pa, gu. Idempotent.
 - `seed/seed.sql` — reference data: 8 specialties, 12 conditions, 10 cities (Delhi, Bangalore, Indore, Mumbai, Hyderabad, Chennai, Pune, Kolkata, Ahmedabad, Jaipur), 15 Delhi areas, 8 Bangalore areas, 4 Indore areas with coordinates, zone, pincode and default radius (6 km inner, 10 km outer).
 - `seed/seed-doctors.sql` — **sample data for development only**: 14 fictional published doctors (slugs match the article links in the frontend, e.g. `dr-arjun-mehta`), 15 clinics across Delhi, Bangalore and Indore, fees, specialties, conditions and published reviews. Registration numbers are placeholders like `DMC/R/SAMPLE-001`. Run `npm run db:seed:doctors:local` after `db:seed:local`; do not run it against production.
 - JSON columns: `doctors.qualifications`, `doctors.languages` are string arrays; `clinics.timings` / `doctor_clinics.timings` are `{"mon":[["10:00","13:00"],["17:00","20:00"]], ...}`.
@@ -91,9 +96,29 @@ Server-rendered Hono JSX, one inline stylesheet, no framework.
 
 Imported doctors start unpublished; review and tick *Published* when the profile is complete.
 
+### Translations (multilingual directory)
+
+No machine translation: admins type the text. Visibility on a language page is driven by the doctor's *Languages* field (English names such as "Hindi", matched case-insensitively; the name ↔ code map is `src/lib/langs.ts` — `LANGS`, `codeForLanguageName`, `languageNameForCode`).
+
+- Doctor edit page → **Translations** card: one small form per site language the doctor speaks (English excluded), fields name / bio / qualifications note + *Reviewed*, saved per language to `POST /admin/doctors/:id/translations/:lang`. If the doctor has no languages the card shows "Add the doctor's languages above to enable translations". Rows for languages the doctor no longer lists are kept but hidden. Submitting all fields empty (and not reviewed) deletes the row.
+- Clinic edit page → **Translations** card: all 9 languages, fields name / address / locality, `POST /admin/clinics/:id/translations/:lang`.
+- City and area forms → **Names in other languages** fieldset (9 inputs `name_<code>`), saved together with the city/area; a blank input deletes that translation.
+
 ## Public API
 
 All responses are `{ ok: true, data }` or `{ ok: false, error }`. GETs send `Cache-Control: public, s-maxage=300`. CORS is enabled for `CORS_ORIGINS`.
+
+### `locale=` (page language)
+
+Every GET below accepts `locale=xx` (`en` default; `hi ta te mr kn bn ml pa gu`; anything else → 400 `invalid locale`). It is distinct from the `lang=` spoken-language *filter* on `/api/listing`, which is unchanged.
+
+- `en` shows every published doctor. Any other locale keeps only doctors whose `languages` contains that language's English name (`src/lib/translations.ts` → `localeFilterSql`, a bound `json_each` EXISTS clause; the listing applies the same rule in JS via `filterByLocale`).
+- Text comes from the translation tables when a non-blank value exists, else the English original (per field): `items[].name`, `clinic.name/locality/address`, `city.name`, `area.name`, `nearbyAreas[].name`, `cityName`/`areaName` on clinics. Specialty and condition names stay English (the frontend has them in its i18n files).
+- `/api/listing` adds `locale` and `langCounts: { en, hi, … }` = distinct doctors in the same scope (all filters except locale) who speak each language, so the frontend only emits hreflang alternates for pages with ≥1 doctor. `indexable` ignores `locale`.
+- `/api/doctors/:slug` adds `locale`, `translated: { name, bio }`, `qualificationsNote` and `availableLocales` (`en` + the doctor's spoken site languages, LANGS order).
+- `/api/clinics/:slug` adds `locale`, `translated: { name, address, locality }`, `availableLocales` (`en` + every language spoken by its doctors); `doctors[]` is filtered by locale like a listing.
+- `/api/cities?locale=xx` translates city/area names; `doctorCount` counts only doctors who speak `xx`.
+- `/api/sitemap?type=…&locale=xx` returns only entries with ≥1 doctor speaking `xx` (doctors: the doctor speaks `xx`) and prefixes `loc` with `/xx` (`https://sexologistindia.com/hi/delhi/sexologist`). `en` output is unchanged.
 
 | Endpoint | Returns |
 | --- | --- |
@@ -117,7 +142,7 @@ Clinics saved without an explicit area are auto-matched to the nearest published
 
 ## Tests
 
-`npm test` runs pure unit tests (no Workers runtime): password hashing (incl. compatibility with `seed-admin.mjs`), slugify and form coercions, geo maths, Places response parsing against `test/fixtures/place.json`, listing ranking/collapse/indexable logic, the doctor form validator, and clinic gallery helpers (ordering, cover, reorder, upload cap, Google photo selection). `npm run typecheck` must pass as well.
+`npm test` runs pure unit tests (no Workers runtime): password hashing (incl. compatibility with `seed-admin.mjs`), slugify and form coercions, geo maths, Places response parsing against `test/fixtures/place.json`, listing ranking/collapse/indexable logic, the doctor form validator, clinic gallery helpers (ordering, cover, reorder, upload cap, Google photo selection), the language map (`langs.ts`), the locale filter SQL builder, translation merge/fallback (`mergeTranslation`, `translateCard`, `filterByLocale`, `langCountsFor`) and the admin translation form parsers. `npm run typecheck` must pass as well.
 
 ## Layout
 
@@ -127,9 +152,10 @@ seed/seed.sql              reference data
 scripts/seed-admin.mjs     master_admin upsert
 src/index.ts               app, CORS, error handler, mounts
 src/env.ts                 Bindings / context types
-src/lib/                   db, password, auth, geo, places, listing, doctorForm, media, photos (clinic galleries)
+src/lib/                   db, password, auth, geo, places, listing, doctorForm, media, photos (clinic galleries), langs (site languages), translations (locale filter + merge/fallback), translationForm (admin parsers)
 src/routes/auth.ts         /auth/*
 src/routes/api.ts          /api/*
-src/routes/admin/          layout + pages (index, doctors, clinics, import, cities, faqs, users, bookings)
+src/routes/admin/          layout + pages (index, doctors, clinics, import, cities, faqs, users, bookings) + translations.tsx (Translations sections)
+seed/seed-translations.sql city/area names in 9 languages
 test/                      vitest
 ```
