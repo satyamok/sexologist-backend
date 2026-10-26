@@ -253,7 +253,7 @@ export function parseTimings(raw: string | null | undefined): Timings | null {
 }
 
 const minutes = (hm: string) => {
-  const [h, m] = hm.split(':').map(Number)
+  const [h = 0, m = 0] = hm.split(':').map(Number)
   return h * 60 + m
 }
 
@@ -261,7 +261,7 @@ const minutes = (hm: string) => {
 export function slotWithinTimings(timings: Timings, date: string, slot: string): boolean {
   const m = slot.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i)
   if (!m) return false
-  const t = ((Number(m[1]) % 12) + (m[3].toUpperCase() === 'PM' ? 12 : 0)) * 60 + Number(m[2])
+  const t = ((Number(m[1]) % 12) + ((m[3] ?? '').toUpperCase() === 'PM' ? 12 : 0)) * 60 + Number(m[2])
   const weekday = new Date(`${date}T00:00:00Z`).getUTCDay()
   const key = DAY_KEYS[weekday]
   const ranges: [string, string][] = key ? (timings[key] ?? []) : []
