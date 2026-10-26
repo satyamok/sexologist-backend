@@ -102,7 +102,7 @@ api.get('/listing', async (c) => {
 
 type DoctorRow = {
   id: string; slug: string; name: string; gender: string; patients_treated: string; photo_key: string | null; qualifications: string
-  registration_number: string | null; registration_council: string | null; is_verified: number; verified_at: string | null
+  registration_number: string | null; registration_council: string | null; is_verified: number; verified_at: string | null; updated_at: string
   experience_years: number | null; languages: string; bio: string | null; video_consult: number; video_fee: number | null
   phone: string | null; whatsapp: string | null; website: string | null; google_maps_url: string | null
   rating_avg: number | null; review_count: number; recommend_pct: number | null; google_rating: number | null; google_review_count: number | null
@@ -112,12 +112,12 @@ type ClinicRow = {
   id: string; slug: string; name: string; address: string; pincode: string | null; locality: string | null; city_id: string; city_slug: string; city_name: string
   area_slug: string | null; area_name: string | null; lat: number; lng: number; phone: string | null; whatsapp: string | null; website: string | null
   timings: string; google_maps_url: string | null; google_rating: number | null; google_review_count: number | null; photo_key: string | null
-  photo_attribution: string | null; clinic_type: string | null; fee?: number | null; is_primary?: number; doctor_timings?: string | null
+  photo_attribution: string | null; clinic_type: string | null; updated_at: string; fee?: number | null; is_primary?: number; doctor_timings?: string | null
 }
 
 const CLINIC_SELECT = `
   SELECT c.id, c.slug, c.name, c.address, c.pincode, c.locality, c.city_id, ci.slug city_slug, ci.name city_name, a.slug area_slug, a.name area_name,
-         c.lat, c.lng, c.phone, c.whatsapp, c.website, c.timings, c.google_maps_url, c.google_rating, c.google_review_count, c.photo_key, c.photo_attribution, c.clinic_type
+         c.lat, c.lng, c.phone, c.whatsapp, c.website, c.timings, c.google_maps_url, c.google_rating, c.google_review_count, c.photo_key, c.photo_attribution, c.clinic_type, c.updated_at
     FROM clinics c JOIN cities ci ON ci.id = c.city_id LEFT JOIN areas a ON a.id = c.area_id`
 
 /** `photos` = ordered gallery; `photoUrl` = cover (first gallery photo, denormalised in clinics.photo_key). */
@@ -125,7 +125,7 @@ function clinicJson(cl: ClinicRow, mediaUrl: string, photos: PhotoRow[] = []) {
   const gallery = photosJson(photos, mediaUrl)
   return {
     photos: gallery,
-    id: cl.id, slug: cl.slug, name: cl.name, address: cl.address, pincode: cl.pincode, locality: cl.locality,
+    id: cl.id, slug: cl.slug, name: cl.name, address: cl.address, pincode: cl.pincode, locality: cl.locality, updatedAt: cl.updated_at,
     citySlug: cl.city_slug, cityName: cl.city_name, city: { slug: cl.city_slug, name: cl.city_name }, areaSlug: cl.area_slug, areaName: cl.area_name,
     lat: cl.lat, lng: cl.lng, phone: cl.phone, whatsapp: cl.whatsapp, website: cl.website,
     timings: cl.doctor_timings && Object.keys(jsonObject(cl.doctor_timings)).length ? jsonObject(cl.doctor_timings) : jsonObject(cl.timings),
@@ -176,7 +176,7 @@ api.get('/doctors/:slug', async (c) => {
     qualifications: jsonStringArray(d.qualifications),
     primarySpecialty: refs.primary ?? refs.specialties[0] ?? { slug: 'sexologist', name: 'Sexologist' },
     specialties: refs.specialties, experienceYears: d.experience_years, languages: jsonStringArray(d.languages),
-    isVerified: d.is_verified === 1, verifiedAt: d.verified_at, registrationNumber: d.registration_number, registrationCouncil: d.registration_council,
+    isVerified: d.is_verified === 1, verifiedAt: d.verified_at, updatedAt: d.updated_at, registrationNumber: d.registration_number, registrationCouncil: d.registration_council,
     videoConsult: d.video_consult === 1, videoFee: d.video_fee,
     ratingAvg: d.rating_avg, reviewCount: d.review_count, recommendPct: d.recommend_pct, googleRating: d.google_rating, googleReviewCount: d.google_review_count,
     conditions: refs.conditions, bio: d.bio, phone: d.phone, whatsapp: d.whatsapp, website: d.website, googleMapsUrl: d.google_maps_url,

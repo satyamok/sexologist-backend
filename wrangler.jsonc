@@ -19,7 +19,7 @@
   "vars": {
     "MEDIA_URL": "https://media.sexologistindia.com",
     "SITE_URL": "https://sexologistindia.com",
-    "MIN_DOCTORS_PER_PAGE": "3",
+    "MIN_DOCTORS_PER_PAGE": "1",
     "CORS_ORIGINS": "http://localhost:5180,https://sexologistindia.com"
   }
   // Secrets (wrangler secret put ...): GOOGLE_PLACES_API_KEY, SESSION_SECRET
