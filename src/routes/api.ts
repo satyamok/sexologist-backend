@@ -263,7 +263,8 @@ export function slotWithinTimings(timings: Timings, date: string, slot: string):
   if (!m) return false
   const t = ((Number(m[1]) % 12) + (m[3].toUpperCase() === 'PM' ? 12 : 0)) * 60 + Number(m[2])
   const weekday = new Date(`${date}T00:00:00Z`).getUTCDay()
-  const ranges: [string, string][] = timings[DAY_KEYS[weekday]] ?? []
+  const key = DAY_KEYS[weekday]
+  const ranges: [string, string][] = key ? (timings[key] ?? []) : []
   return ranges.some(([open, close]) => t >= minutes(open) && t + 30 <= minutes(close))
 }
 
