@@ -1,0 +1,28 @@
+{
+  "name": "sexologistbe",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:migrate:local": "wrangler d1 migrations apply sexologistindia-db --local",
+    "db:migrate": "wrangler d1 migrations apply sexologistindia-db --remote",
+    "db:seed:local": "wrangler d1 execute sexologistindia-db --file=seed/seed.sql --local",
+    "db:seed": "wrangler d1 execute sexologistindia-db --file=seed/seed.sql --remote",
+    "db:seed:doctors:local": "wrangler d1 execute sexologistindia-db --file=seed/seed-doctors.sql --local",
+    "db:seed:doctors": "wrangler d1 execute sexologistindia-db --file=seed/seed-doctors.sql --remote",
+    "seed:admin": "node scripts/seed-admin.mjs"
+  },
+  "dependencies": {
+    "hono": "^4.13.14"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261019.1",
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0",
+    "wrangler": "^4.0.0"
+  }
+}

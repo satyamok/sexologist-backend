@@ -1,0 +1,42 @@
+{
+  "id": "ChIJTestLajpatNagar123",
+  "displayName": { "text": "Dr. Rakesh Sharma - Sexologist in Lajpat Nagar", "languageCode": "en" },
+  "formattedAddress": "B-12, Lajpat Nagar II, New Delhi, Delhi 110024, India",
+  "location": { "latitude": 28.5689, "longitude": 77.2412 },
+  "rating": 4.6,
+  "userRatingCount": 212,
+  "primaryType": "doctor",
+  "primaryTypeDisplayName": { "text": "Doctor", "languageCode": "en" },
+  "types": ["doctor", "health", "point_of_interest", "establishment"],
+  "nationalPhoneNumber": "098110 12345",
+  "internationalPhoneNumber": "+91 98110 12345",
+  "websiteUri": "https://example.com/dr-rakesh",
+  "googleMapsUri": "https://maps.google.com/?cid=123",
+  "businessStatus": "OPERATIONAL",
+  "photos": [
+    {
+      "name": "places/ChIJTestLajpatNagar123/photos/abc",
+      "widthPx": 1200,
+      "heightPx": 800,
+      "authorAttributions": [{ "displayName": "Rakesh Sharma", "uri": "https://maps.google.com/maps/contrib/1" }]
+    }
+  ],
+  "addressComponents": [
+    { "longText": "B-12", "shortText": "B-12", "types": ["premise"] },
+    { "longText": "Lajpat Nagar II", "shortText": "Lajpat Nagar II", "types": ["sublocality_level_2", "sublocality", "political"] },
+    { "longText": "Lajpat Nagar", "shortText": "Lajpat Nagar", "types": ["sublocality_level_1", "sublocality", "political"] },
+    { "longText": "New Delhi", "shortText": "New Delhi", "types": ["locality", "political"] },
+    { "longText": "Delhi", "shortText": "DL", "types": ["administrative_area_level_1", "political"] },
+    { "longText": "India", "shortText": "IN", "types": ["country", "political"] },
+    { "longText": "110024", "shortText": "110024", "types": ["postal_code"] }
+  ],
+  "regularOpeningHours": {
+    "periods": [
+      { "open": { "day": 1, "hour": 10, "minute": 0 }, "close": { "day": 1, "hour": 13, "minute": 0 } },
+      { "open": { "day": 1, "hour": 17, "minute": 0 }, "close": { "day": 1, "hour": 20, "minute": 30 } },
+      { "open": { "day": 2, "hour": 10, "minute": 0 }, "close": { "day": 2, "hour": 13, "minute": 0 } },
+      { "open": { "day": 0, "hour": 11, "minute": 0 }, "close": { "day": 0, "hour": 14, "minute": 0 } }
+    ],
+    "weekdayDescriptions": ["Monday: 10:00 AM – 1:00 PM, 5:00 – 8:30 PM"]
+  }
+}
