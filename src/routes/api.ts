@@ -14,12 +14,25 @@ const SORTS: Sort[] = ['relevance', 'distance', 'experience', 'fee_asc', 'fee_de
 const SLUG = /^[a-z0-9-]{1,80}$/
 
 // Edge cache: detail pages refresh within a minute of an admin edit; listings and lookups may be 5 minutes behind.
+// A Cache-Control header alone does not cache a Worker's own responses (Workers run in front of the CDN cache, and the
+// frontend Worker's fetch with cf.cacheTtl is not cached either), so responses are stored explicitly with the Cache API.
+// Without this every page render re-ran the heavy count queries on D1.
 const DETAIL = /^\/api\/(doctors|clinics|redirects)\//
 api.use('*', async (c, next) => {
+  const cache = c.req.method === 'GET' && typeof caches !== 'undefined' ? (caches as unknown as { default: Cache }).default : null
+  const key = cache ? new Request(c.req.url, { method: 'GET' }) : null
+  if (cache && key) {
+    const hit = await cache.match(key)
+    if (hit) return new Response(hit.body, hit)
+  }
   await next()
   if (c.req.method === 'GET' && c.res.ok) {
     const ttl = DETAIL.test(new URL(c.req.url).pathname) ? 60 : 300
-    c.res.headers.set('Cache-Control', `public, s-maxage=${ttl}`)
+    c.res.headers.set('Cache-Control', `public, max-age=${ttl}, s-maxage=${ttl}`)
+    if (cache && key) {
+      const put = cache.put(key, c.res.clone()).catch(() => {})
+      try { c.executionCtx.waitUntil(put) } catch { await put }
+    }
   }
 })
 
@@ -42,20 +55,24 @@ api.get('/cities', async (c) => {
   if (!locale) return c.json(BAD_LOCALE, 400)
   const lc = localeClause(locale)
   // doctorCount per city/area counts only doctors who speak the locale (everyone for en).
+  // Counts come from one GROUP BY pass over the published doctor↔clinic links, not a correlated subquery per
+  // city/area (that re-scanned the doctors table once per row: ~680k rows read per call).
   const cities = await all<{ id: string; slug: string; name: string; state: string; lat: number | null; lng: number | null; doctor_count: number }>(
     c.env.DB,
-    `SELECT ci.id, ci.slug, ci.name, ci.state, ci.lat, ci.lng,
-            (SELECT COUNT(DISTINCT d.id) FROM doctors d JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id
-              WHERE d.is_published = 1 AND cl.is_published = 1 AND cl.city_id = ci.id${lc.sql}) doctor_count
-       FROM cities ci WHERE ci.is_published = 1 ORDER BY ci.name`,
+    `WITH n AS (SELECT cl.city_id id, COUNT(DISTINCT d.id) n
+                  FROM doctors d JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id
+                 WHERE d.is_published = 1 AND cl.is_published = 1${lc.sql} GROUP BY cl.city_id)
+     SELECT ci.id, ci.slug, ci.name, ci.state, ci.lat, ci.lng, COALESCE(n.n, 0) doctor_count
+       FROM cities ci LEFT JOIN n ON n.id = ci.id WHERE ci.is_published = 1 ORDER BY ci.name`,
     ...lc.params,
   )
   const areas = await all<{ id: string; city_id: string; slug: string; name: string; zone: string | null; doctor_count: number }>(
     c.env.DB,
-    `SELECT a.id, a.city_id, a.slug, a.name, a.zone,
-            (SELECT COUNT(DISTINCT d.id) FROM doctors d JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id
-              WHERE d.is_published = 1 AND cl.is_published = 1 AND cl.area_id = a.id${lc.sql}) doctor_count
-       FROM areas a WHERE a.is_published = 1 ORDER BY a.name`,
+    `WITH n AS (SELECT cl.area_id id, COUNT(DISTINCT d.id) n
+                  FROM doctors d JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id
+                 WHERE d.is_published = 1 AND cl.is_published = 1 AND cl.area_id IS NOT NULL${lc.sql} GROUP BY cl.area_id)
+     SELECT a.id, a.city_id, a.slug, a.name, a.zone, COALESCE(n.n, 0) doctor_count
+       FROM areas a LEFT JOIN n ON n.id = a.id WHERE a.is_published = 1 ORDER BY a.name`,
     ...lc.params,
   )
   // Doctors per city per specialty, so a city card can link to specialties that actually have doctors.
