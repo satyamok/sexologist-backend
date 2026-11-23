@@ -319,9 +319,11 @@ api.get('/sitemap', async (c) => {
   const min = Number(c.env.MIN_DOCTORS_PER_PAGE) || 3
   type Row = { loc: string; lastmod: string | null; n?: number }
   let rows: Row[] = []
+  // One aggregate pass per sitemap (no per-city/per-clinic correlated subqueries, which re-scanned doctors for every row).
+  // Pairs with zero doctors are simply absent; they were filtered out by `n >= min` (min >= 1) anyway.
   switch (type) {
     case 'cities':
-      rows = (await all<{ slug: string; n: number }>(db, `SELECT ci.slug, (SELECT COUNT(DISTINCT d.id) FROM doctors d JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id WHERE d.is_published = 1 AND cl.is_published = 1 AND cl.city_id = ci.id${lc.sql}) n FROM cities ci WHERE ci.is_published = 1`, ...lc.params))
+      rows = (await all<{ slug: string; n: number }>(db, `SELECT ci.slug, COUNT(DISTINCT d.id) n FROM doctors d JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id JOIN cities ci ON ci.id = cl.city_id WHERE ci.is_published = 1 AND d.is_published = 1 AND cl.is_published = 1${lc.sql} GROUP BY ci.id`, ...lc.params))
         .filter((r) => r.n >= min).map((r) => ({ loc: `${site}/${r.slug}/sexologist`, lastmod: null }))
       break
     case 'areas': {
@@ -339,11 +341,11 @@ api.get('/sitemap', async (c) => {
         .map((r) => ({ loc: `${site}/doctor/${r.slug}`, lastmod: r.updated_at }))
       break
     case 'clinics':
-      rows = (await all<{ slug: string; updated_at: string }>(db, `SELECT c.slug, c.updated_at FROM clinics c WHERE c.is_published = 1 AND EXISTS (SELECT 1 FROM doctor_clinics dc JOIN doctors d ON d.id = dc.doctor_id WHERE dc.clinic_id = c.id AND d.is_published = 1${lc.sql})`, ...lc.params))
+      rows = (await all<{ slug: string; updated_at: string }>(db, `SELECT c.slug, c.updated_at FROM clinics c WHERE c.is_published = 1 AND c.id IN (SELECT dc.clinic_id FROM doctor_clinics dc JOIN doctors d ON d.id = dc.doctor_id WHERE d.is_published = 1${lc.sql})`, ...lc.params))
         .map((r) => ({ loc: `${site}/clinic/${r.slug}`, lastmod: r.updated_at }))
       break
     case 'conditions':
-      rows = (await all<{ city: string; cond: string; n: number }>(db, `SELECT ci.slug city, cn.slug cond, (SELECT COUNT(DISTINCT d.id) FROM doctors d JOIN doctor_conditions dcn ON dcn.doctor_id = d.id AND dcn.condition_id = cn.id JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id WHERE d.is_published = 1 AND cl.is_published = 1 AND cl.city_id = ci.id${lc.sql}) n FROM cities ci CROSS JOIN conditions cn WHERE ci.is_published = 1`, ...lc.params))
+      rows = (await all<{ city: string; cond: string; n: number }>(db, `SELECT ci.slug city, cn.slug cond, COUNT(DISTINCT d.id) n FROM doctors d JOIN doctor_conditions dcn ON dcn.doctor_id = d.id JOIN conditions cn ON cn.id = dcn.condition_id JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics cl ON cl.id = dc.clinic_id JOIN cities ci ON ci.id = cl.city_id WHERE ci.is_published = 1 AND d.is_published = 1 AND cl.is_published = 1${lc.sql} GROUP BY ci.id, cn.id`, ...lc.params))
         .filter((r) => r.n >= min).map((r) => ({ loc: `${site}/${r.city}/${r.cond}-doctor`, lastmod: null }))
       break
     default:

@@ -451,13 +451,15 @@ async function doctorPrimary(db: D1Database, ids: string[]): Promise<Map<string,
   return map
 }
 
-/** Count of published doctors (optionally of a specialty) with a clinic in a given area. */
+/** Count of published doctors (optionally of a specialty) with a clinic in each area of a city: one GROUP BY pass, not a subquery per area. */
 const COUNT_IN_AREA = `
-  SELECT a.id, a.slug, a.name, a.lat, a.lng,
-         (SELECT COUNT(DISTINCT d.id) FROM doctors d JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics c ON c.id = dc.clinic_id
-           WHERE d.is_published = 1 AND c.is_published = 1 AND c.area_id = a.id
-             AND (? IS NULL OR EXISTS (SELECT 1 FROM doctor_specialties ds WHERE ds.doctor_id = d.id AND ds.specialty_id = ?))) doctor_count
-    FROM areas a WHERE a.city_id = ? AND a.is_published = 1`
+  WITH n AS (SELECT c.area_id id, COUNT(DISTINCT d.id) n
+               FROM doctors d JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics c ON c.id = dc.clinic_id
+              WHERE d.is_published = 1 AND c.is_published = 1 AND c.area_id IS NOT NULL
+                AND (? IS NULL OR EXISTS (SELECT 1 FROM doctor_specialties ds WHERE ds.doctor_id = d.id AND ds.specialty_id = ?))
+              GROUP BY c.area_id)
+  SELECT a.id, a.slug, a.name, a.lat, a.lng, COALESCE(n.n, 0) doctor_count
+    FROM areas a LEFT JOIN n ON n.id = a.id WHERE a.city_id = ? AND a.is_published = 1`
 
 async function nearbyAreasFor(db: D1Database, city: CityRow | null, area: AreaRow | null, specialty: SpecialtyRow | null) {
   if (!city) return []
@@ -473,11 +475,13 @@ async function nearbyAreasFor(db: D1Database, city: CityRow | null, area: AreaRo
 async function otherSpecialtiesFor(db: D1Database, city: CityRow | null, area: AreaRow | null, specialty: SpecialtyRow | null) {
   const rows = await all<{ slug: string; name: string; doctor_count: number }>(
     db,
-    `SELECT s.slug, s.name,
-            (SELECT COUNT(DISTINCT d.id) FROM doctors d JOIN doctor_specialties ds ON ds.doctor_id = d.id AND ds.specialty_id = s.id
-               JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics c ON c.id = dc.clinic_id
-              WHERE d.is_published = 1 AND c.is_published = 1 AND (? IS NULL OR c.city_id = ?) AND (? IS NULL OR c.area_id = ?)) doctor_count
-       FROM specialties s WHERE s.id <> ? ORDER BY s.name`,
+    `WITH n AS (SELECT ds.specialty_id id, COUNT(DISTINCT d.id) n
+                  FROM doctors d JOIN doctor_specialties ds ON ds.doctor_id = d.id
+                  JOIN doctor_clinics dc ON dc.doctor_id = d.id JOIN clinics c ON c.id = dc.clinic_id
+                 WHERE d.is_published = 1 AND c.is_published = 1 AND (? IS NULL OR c.city_id = ?) AND (? IS NULL OR c.area_id = ?)
+                 GROUP BY ds.specialty_id)
+     SELECT s.slug, s.name, COALESCE(n.n, 0) doctor_count
+       FROM specialties s LEFT JOIN n ON n.id = s.id WHERE s.id <> ? ORDER BY s.name`,
     city?.id ?? null, city?.id ?? null, area?.id ?? null, area?.id ?? null, specialty?.id ?? '',
   )
   return rows.map((r) => ({ slug: r.slug, name: r.name, doctorCount: r.doctor_count }))
